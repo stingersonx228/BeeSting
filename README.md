@@ -1,78 +1,78 @@
 # 🐝 BeeSting
 
-**Скилл для Claude Code: аудит и защита сайтов «статика + Supabase + Vercel».**
+**A Claude Code skill for auditing and hardening "static frontend + Supabase + Vercel" sites.**
 
-> *EN: A Claude Code skill that audits and hardens static sites backed by Supabase — RLS and grants, SECURITY DEFINER RPCs, migrations verified on a local Supabase-like Postgres, strict CSP without `unsafe-inline` + SRI, Cloudflare Turnstile gate via Edge Function, and staff 2FA (aal2). Docs are in Russian.*
+A Supabase project's URL and anon key are public. Anyone can open the browser console and call anything the `anon` and `authenticated` roles are allowed to, bypassing your site. BeeSting teaches the agent to find these holes in the database, close them with a migration, test the SQL locally before it goes to production, and bring the frontend up to a strict Content Security Policy.
 
-Anon key и URL проекта Supabase публичны, поэтому любой может вызвать из консоли всё, что разрешено ролям `anon` и `authenticated`, в обход сайта. BeeSting учит агента искать такие дыры в базе, закрывать их миграцией, проверять SQL локально до того, как его запустят на проде, и доводить фронт до строгой CSP.
+> The skill's instructions and reference docs are written in Russian. Claude reads them fine and answers in the user's language.
 
-## Что внутри
+## What's inside
 
 | | |
 |---|---|
-| `SKILL.md` | Процесс: карта проекта → аудит → миграция-исправление → проверка → передача владельцу базы |
-| `references/supabase-audit.md` | Чек-лист RLS, грантов, SECURITY DEFINER, view, realtime, бизнес-логики и клиента; шаблон миграции |
-| `references/sql-verification.md` | Как проверять миграции на локальном стенде и писать сценарии «свой может / чужой нет» |
-| `references/csp-sri.md` | Строгая CSP без `unsafe-inline`, `script-src-attr 'none'`, SRI, заголовки, выкатка через Report-Only |
-| `references/turnstile-gate.md` | Антиспам: Turnstile + Edge Function-шлюз + lock-миграция, порядок выкатки и откат |
-| `references/staff-mfa.md` | 2FA персонала (TOTP, Supabase MFA) с проверкой `aal2` в базе |
-| `scripts/pg-harness/` | Supabase-подобный Postgres 17 (embedded): роли, `auth.uid()/jwt()`, default privileges, аудит прав, сценарии |
-| `scripts/csp_scan.mjs` | Находит всё, что мешает строгой CSP: inline-скрипты, `on*`-атрибуты, `javascript:`, CDN без SRI |
-| `scripts/sri.sh` | SRI-хэши для файлов с CDN |
-| `assets/` | Шаблоны: `turnstile-gate.ts` (Edge Function), `staff-mfa.js` (экран 2FA для панели) |
-| `evals/` | 3 тест-кейса на учебном проекте с заложенными дырами + оценщик базы |
+| `SKILL.md` | The workflow: map the project → audit → fix with a migration → verify → hand off to the database owner |
+| `references/supabase-audit.md` | Checklist for RLS, grants, SECURITY DEFINER functions, views, realtime, business logic and client code, plus a migration template |
+| `references/sql-verification.md` | How to test migrations on the local harness and write "owner can / stranger can't" scenarios |
+| `references/csp-sri.md` | Strict CSP without `unsafe-inline`, `script-src-attr 'none'`, SRI, security headers, rollout via Report-Only |
+| `references/turnstile-gate.md` | Anti-spam: Cloudflare Turnstile + an Edge Function gate + a lock migration, rollout order and rollback |
+| `references/staff-mfa.md` | Staff 2FA (TOTP via Supabase MFA) enforced in the database with an `aal2` check |
+| `scripts/pg-harness/` | Supabase-like Postgres 17 (embedded): roles, `auth.uid()` / `auth.jwt()`, default privileges, a permissions audit and test scenarios |
+| `scripts/csp_scan.mjs` | Finds everything that blocks a strict CSP: inline scripts, `on*` attributes, `javascript:` URLs, CDN scripts without SRI |
+| `scripts/sri.sh` | SRI hashes for CDN files |
+| `assets/` | Templates: `turnstile-gate.ts` (Edge Function) and `staff-mfa.js` (2FA screen for an admin panel) |
+| `evals/` | 3 test cases on a training project with planted vulnerabilities, plus a database grader |
 
-## Установка
+## Installation
 
 ```bash
 git clone https://github.com/stingersonx228/BeeSting.git ~/.claude/skills/beesting
 ```
 
-Скилл срабатывает сам, когда в проекте есть Supabase и вы просите что-то вроде «проверь безопасность», «почини RLS», «закрой RPC от anon», «сделай нормальную CSP», «добавь капчу на заказы», «включи 2FA для админки». Можно вызвать явно: `/beesting`.
+The skill triggers on its own when the project uses Supabase and you ask for something like "check our security", "fix RLS", "lock this RPC away from anon", "set up a proper CSP", "add a captcha to orders" or "enable 2FA for the admin panel". You can also invoke it explicitly with `/beesting`.
 
-Для стенда нужен Node.js 18+ и npm. Он ставится во временную папку, в проект ничего не попадает:
+The harness needs Node.js 18+ and npm. It installs into a temporary folder, so nothing ends up in your project:
 
 ```bash
 cp -r ~/.claude/skills/beesting/scripts/pg-harness /tmp/pgh && sh /tmp/pgh/setup.sh
-node /tmp/pgh/harness.mjs --repo ./my-site                                   # порядок миграций из DEPLOY.md/README.md
+node /tmp/pgh/harness.mjs --repo ./my-site                                   # migration order from DEPLOY.md / README.md
 node /tmp/pgh/harness.mjs --repo ./my-site --twice fix.sql --scenario checks.mjs
 node ~/.claude/skills/beesting/scripts/csp_scan.mjs ./my-site
 ```
 
-Пример отчёта стенда:
+Sample harness report (the tool prints in Russian; translated here):
 
 ```
-✓ применён schema.sql
-✓ применён promo.sql
-⚠ Таблицы public без RLS: 1
+✓ applied schema.sql
+✓ applied promo.sql
+⚠ Tables in public without RLS: 1
    - staff (anon: select+write)
-⚠ SECURITY DEFINER без set search_path: 2
-⚠ Функции, доступные через /rest/v1/rpc (проверить каждую): 3
-   - mark_paid(bigint) — anon+authenticated, через PUBLIC, DEFINER, без проверки личности
-⚠ View без security_invoker, читаемые anon/authenticated (обходят RLS): 1
+⚠ SECURITY DEFINER without set search_path: 2
+⚠ Functions callable via /rest/v1/rpc (review each one): 3
+   - mark_paid(bigint) — anon+authenticated, via PUBLIC, DEFINER, no identity check
+⚠ Views without security_invoker readable by anon/authenticated (bypass RLS): 1
 ```
 
-## Бенчмарк
+## Benchmark
 
-Три задачи на учебном сайте пиццерии, по одному прогону со скиллом и без (Claude Opus):
+Three tasks on a training pizzeria site, one run each with and without the skill (Claude Opus):
 
-| Задача | Со скиллом | Без |
+| Task | With skill | Without |
 |---|---|---|
-| Аудит безопасности | 10/10 | 9/10 |
-| Миграция-исправление с проверкой | 11/11 | 10/11 |
-| Строгая CSP | 7/8 | 6/8 |
-| **Итого** | **96%** | **85%** |
+| Security audit | 10/10 | 9/10 |
+| Fix migration with verification | 11/11 | 10/11 |
+| Strict CSP | 7/8 | 6/8 |
+| **Total** | **96%** | **85%** |
 
-Со скиллом агент подтверждает атаки на стенде, а не только по коду, находит «ленивые» вызовы supabase-js без `await`, отдаёт SQL целиком для SQL Editor, прикладывает откат и порядок выкатки.
+With the skill, the agent confirms attacks on the harness instead of only reading the code. It also catches lazy supabase-js calls that are never `await`ed (so the request is never sent), hands over the full SQL for the SQL Editor, and includes a rollback script and a rollout order.
 
-## Принципы
+## Principles
 
-- Защита живёт в базе; проверки в JS только для удобства.
-- Применённые миграции не редактируются: исправление идёт новым идемпотентным файлом.
-- Каждый SQL до передачи проходит на стенде со всеми предыдущими миграциями, повторно и со сценариями.
-- Каждый шаг выкатки оставляет сайт рабочим и имеет откат.
-- Ничего не применяется к проду без явной просьбы.
+- Security lives in the database. Checks in JavaScript are only for convenience.
+- Applied migrations are never edited: fixes go into a new idempotent file.
+- Before handoff, every SQL change runs on the harness after all previous migrations, then a second time, then against the test scenarios.
+- Every rollout step leaves the site working and has a rollback.
+- Nothing touches production unless explicitly requested.
 
-## Лицензия
+## License
 
 [MIT](LICENSE)
