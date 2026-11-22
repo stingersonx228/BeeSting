@@ -1,25 +1,21 @@
-# 2FA персонала через Supabase MFA
+# Staff 2FA with Supabase MFA
 
-После входа паролем JWT имеет уровень `aal1`. После подтверждения TOTP
-Supabase выдаёт сессии JWT с `aal2`. Экран кода управляет входом в панель.
-Доступ к данным проверяют RLS и RPC по подписанному JWT: браузер может
-отправлять запросы к API напрямую, минуя интерфейс. `aal2` подтверждает уровень
-входа; роль сотрудника по-прежнему берётся из таблицы `staff`.
+After a password sign-in the JWT has level `aal1`. After TOTP verification Supabase issues
+session JWTs with `aal2`. The code screen only gates entry to the panel. Data access is enforced
+by RLS and RPCs based on the signed JWT, because the browser can call the API directly and skip
+the UI. `aal2` proves the sign-in level; the staff role still comes from the `staff` table.
 [Supabase MFA](https://supabase.com/docs/guides/auth/auth-mfa)
 
-## Проверка в базе
+## The check in the database
 
-Сведите проверки персонала к `public.is_staff(auth.uid())` и
-`public.is_admin(auth.uid())`. Проверьте политики с альтернативными условиями
-доступа, RPC с `SECURITY DEFINER`, аналитические view и доступ к данным через
-Realtime. Прямые проверки членства, оставшиеся в отдельных RPC или политиках,
-могут пропускать `aal1`. Для инвентаризации используйте
-`references/supabase-audit.md`.
+Route all staff checks through `public.is_staff(auth.uid())` and `public.is_admin(auth.uid())`.
+Review policies with alternative access conditions, `SECURITY DEFINER` RPCs, analytics views and
+data access via Realtime. Direct membership checks left in individual RPCs or policies can let
+`aal1` through. Use `references/supabase-audit.md` for the inventory.
 
-Пример новой миграции для существующей таблицы `public.staff(id, role)`.
-Сохраните имена параметров, владельцев функций и действующие правила ролей
-проекта. `uid = auth.uid()` позволяет проверять только себя.
-`coalesce` отклоняет JWT без `aal`.
+Example of a new migration for an existing `public.staff(id, role)` table. Keep the project's
+parameter names, function owners and role rules. `uid = auth.uid()` means a caller can only
+check themselves. `coalesce` rejects a JWT without `aal`.
 
 ```sql
 begin;
@@ -53,19 +49,17 @@ revoke execute on function public.is_admin(uuid) from public, anon, authenticate
 commit;
 ```
 
-В этом варианте RLS вызывает `is_staff` от `authenticated`, а `is_admin`
-вызывается внутри привилегированной RPC или view с подходящими правами
-владельца. Если `is_admin` нужна непосредственно в RLS или
-`security_invoker` view, вызывающей роли понадобится `EXECUTE`.
-В PL/pgSQL используйте проверку `if public.is_admin(auth.uid()) is not true
-then raise exception 'not admin'; end if;`: при неопределённом результате
-доступ также закрыт.
+In this variant RLS calls `is_staff` as `authenticated`, while `is_admin` is called inside a
+privileged RPC or view whose owner has the right permissions. If you need `is_admin` directly in
+RLS or in a `security_invoker` view, the calling role needs `EXECUTE`. In PL/pgSQL use
+`if public.is_admin(auth.uid()) is not true then raise exception 'not admin'; end if;` so that a
+null result also denies access.
 
-## Панель на vanilla JS
+## Vanilla JS panel
 
-Скопируйте `assets/staff-mfa.js` в сайт и загрузите перед скриптом панели.
-Используйте тот же экземпляр Supabase JS v2 для входа, MFA, запросов к данным
-и подписок. Задайте `issuer` как постоянную строку конфигурации приложения.
+Copy `assets/staff-mfa.js` into the site and load it before the panel script. Use the same
+Supabase JS v2 instance for sign-in, MFA, data queries and subscriptions. Set `issuer` to a
+constant string from the app config.
 
 ```html
 <section id="mfa" class="hide"><div class="card"></div></section>
@@ -73,8 +67,8 @@ then raise exception 'not admin'; end if;`: при неопределённом 
 <script defer src="/admin.js"></script>
 ```
 
-К этому моменту загрузите Supabase JS и определите класс `.hide`.
-В `boot()` после проверки сессии и перед запросами к данным вставьте:
+By this point Supabase JS must be loaded and a `.hide` class defined. In `boot()`, after the
+session check and before any data queries, insert:
 
 ```js
 async function confirmStaffSession(sb, signOutStaff) {
@@ -82,68 +76,58 @@ async function confirmStaffSession(sb, signOutStaff) {
   if (error || !session) return false;
   return window.StaffMFA.ensure(sb, document.querySelector("#mfa"), {
     onSignOut: signOutStaff,
-    issuer: "Панель персонала",
+    issuer: "Staff panel",
   });
 }
 
-// В async boot() панели:
+// In the panel's async boot():
 // if (!(await confirmStaffSession(sb, signOutStaff)) || signingOut) return;
 ```
 
-До завершения `ensure` держите рабочую панель скрытой. Если нужен ранний
-поиск сотрудника по `session.user.id`, оставьте чтение собственной минимальной
-записи под отдельной self-only политикой. Если поиск опирается на
-`is_staff`, перенесите его после MFA: при `aal1` проверка вернёт отказ и
-до экрана кода дело не дойдёт. После `ensure` загрузите роль, данные и
-подписки. При выходе остановите таймеры, снимите подписки, очистите данные
-панели и вызовите `sb.auth.signOut()`.
+Keep the working panel hidden until `ensure` resolves. If you need an early staff lookup by
+`session.user.id`, keep reading the user's own minimal row under a separate self-only policy. If
+the lookup relies on `is_staff`, move it after MFA: at `aal1` the check denies access and the
+code screen would never be reached. After `ensure`, load the role, data and subscriptions. On
+sign-out, stop timers, remove subscriptions, clear panel data and call `sb.auth.signOut()`.
 
-Что делает шаблон:
+What the template does:
 
-1. `getAuthenticatorAssuranceLevel()` возвращает `currentLevel` и
-   `nextLevel`. Если текущий уровень уже `aal2`, можно продолжать.
-   `nextLevel === 'aal2'` означает, что уровень можно повысить.
-2. При `aal1` вызовите `listFactors()`. Для подтверждённого TOTP из
-   `factors.totp` покажите ввод шестизначного кода.
-3. Если подтверждённого TOTP нет, возьмите из `factors.all` незавершённые
-   TOTP и удалите через `unenroll({ factorId })`. При адаптации шаблона
-   обрабатывайте ошибку удаления до `enroll`. Затем вызовите
-   `enroll({ factorType: 'totp', issuer, friendlyName })`, покажите
-   `data.totp.qr_code` или ручной секрет. QR и секрет не храните в логах
-   и очищайте из интерфейса при завершении или выходе.
-4. `challengeAndVerify({ factorId, code })` создаёт challenge и проверяет
-   код. После успеха SDK использует обновлённую сессию. Если вызываете API
-   через свой `fetch`, возьмите новый access token. При неверном или
-   просроченном коде оставьте возможность повтора без новой привязки,
-   при rate limit покажите, что нужно подождать.
+1. `getAuthenticatorAssuranceLevel()` returns `currentLevel` and `nextLevel`. If the current level
+   is already `aal2`, continue. `nextLevel === 'aal2'` means the level can be raised.
+2. At `aal1`, call `listFactors()`. For a verified TOTP in `factors.totp`, show the six-digit code
+   input.
+3. If there is no verified TOTP, take the unfinished TOTP factors from `factors.all` and remove them
+   with `unenroll({ factorId })`. When adapting the template, handle an unenroll error before
+   `enroll`. Then call `enroll({ factorType: 'totp', issuer, friendlyName })` and show
+   `data.totp.qr_code` or the manual secret. Don't log the QR or secret, and clear them from the UI
+   on completion or sign-out.
+4. `challengeAndVerify({ factorId, code })` creates a challenge and verifies the code. After success
+   the SDK uses the refreshed session. If you call the API with your own `fetch`, take the new
+   access token. For a wrong or expired code, allow a retry without re-enrolling; on a rate limit,
+   tell the user to wait.
 
-## Выкатка
+## Rollout
 
-1. **Проверить настройки Auth.** Включите TOTP enrollment и verification.
-   Для паролей персонала настройте минимум 12 символов и проверьте действующие
-   учётные записи. Сохраните ограничения попыток входа и MFA verification.
-   Если саморегистрация не нужна витрине и другим клиентам, отключите
-   `Allow new users to sign up`. Учётные записи персонала создавайте
-   административно. [Настройки Auth](https://supabase.com/docs/guides/auth/general-configuration)
-2. **Выкатить сайт.** Обновите все панели персонала. Проверьте привязку,
-   повторный вход и выход, а также восстановление после неверного кода.
-   На этом этапе прежние правила базы ещё действуют.
-3. **Дождаться всех сотрудников.** Каждый администратор и оператор
-   привязывает фактор и входит по коду в новой сессии. Перед переключением
-   проверьте наличие подтверждённого фактора у каждого. Начальную привязку
-   и повторную привязку после сброса проводите после подтверждения личности:
-   у аккаунта без фактора пароль позволяет начать enrollment.
-4. **Применить миграцию.** Прогоните её на стенде и примените последней.
-   Проверьте, что с `aal1` защищённые данные и операции недоступны, с
-   `aal2` оператор видит свои разделы, а администратор выполняет свои
-   операции. Публичные сценарии сайта должны продолжать работать.
+1. **Check Auth settings.** Enable TOTP enrollment and verification. Require at least 12 characters
+   for staff passwords and review existing accounts. Keep sign-in and MFA verification rate limits
+   on. If neither the storefront nor other clients need self-sign-up, disable
+   `Allow new users to sign up` and create staff accounts administratively.
+   [Auth settings](https://supabase.com/docs/guides/auth/general-configuration)
+2. **Deploy the site.** Update every staff panel. Test enrollment, re-sign-in and sign-out, and
+   recovery after a wrong code. The old database rules still apply at this stage.
+3. **Wait for every staff member.** Each admin and operator enrolls a factor and signs in with a code
+   in a new session. Before switching, confirm that everyone has a verified factor. Do initial
+   enrollment and re-enrollment after a reset only after verifying the person's identity: on an
+   account without a factor, the password alone is enough to start enrollment.
+4. **Apply the migration.** Run it on the harness and apply it last. Check that at `aal1` protected
+   data and operations are unavailable, at `aal2` an operator sees their sections and an admin can
+   perform admin operations. The site's public flows must keep working.
 
-## Сброс фактора
+## Resetting a factor
 
-Подтвердите личность сотрудника и найдите точный UUID в Authentication →
-Users. Удалите нужный фактор через Auth Admin API из доверенного серверного
-окружения. Здесь `adminClient` — экземпляр клиента с серверным ключом,
-`userId` и `factorId` — проверенные UUID.
+Verify the staff member's identity and find the exact UUID in Authentication → Users. Delete the
+factor through the Auth Admin API from a trusted server environment. Here `adminClient` is a client
+instance with the server key, and `userId` and `factorId` are verified UUIDs.
 
 ```js
 const { error } = await adminClient.auth.admin.mfa.deleteFactor({
@@ -153,54 +137,48 @@ const { error } = await adminClient.auth.admin.mfa.deleteFactor({
 if (error) throw error;
 ```
 
-Supabase завершает активные сессии при удалении подтверждённого фактора.
-Уже выпущенный access token может оставаться действительным до истечения
-срока, если приложение проверяет только JWT. Попросите сотрудника заново
-войти. При отсутствии подтверждённых факторов откроется привязка телефона.
-Удаление строк напрямую из `auth.mfa_factors` встречается в старых
-инструкциях; используйте Auth Admin API для штатного сброса с завершением
-сессий. [Supabase deleteFactor](https://supabase.com/docs/reference/javascript/auth-admin-deletefactor)
+Supabase ends active sessions when a verified factor is deleted. An already issued access token may
+stay valid until it expires if the app only checks the JWT. Ask the person to sign in again; with no
+verified factors they'll be offered enrollment. Deleting rows directly from `auth.mfa_factors`
+appears in older guides; use the Auth Admin API for a proper reset that ends sessions.
+[Supabase deleteFactor](https://supabase.com/docs/reference/javascript/auth-admin-deletefactor)
 
-## Откат
+## Rollback
 
-Подготовьте новый SQL-файл с предыдущими определениями `is_staff` и
-`is_admin` и прежними грантами. Восстановите их одной транзакцией, сохранив
-ограничение на свой UID и проверку роли. Проверьте панели. Если нужен откат
-фронта, делайте его после SQL: старый клиент иначе остановится на `aal1`.
-Уже привязанные факторы сохраняются. После SQL-отката пароль снова достаточен
-для запросов к данным персонала, даже если панель по-прежнему просит код.
+Prepare a new SQL file with the previous definitions of `is_staff` and `is_admin` and the previous
+grants. Restore them in one transaction, keeping the own-UID restriction and the role check. Test
+the panels. If the frontend also needs rolling back, do it after the SQL — otherwise the old client
+stops at `aal1`. Enrolled factors are kept. After the SQL rollback a password is again enough to
+query staff data, even if the panel still asks for a code.
 
-## Грабли
+## Pitfalls
 
-- Брошенная привязка оставляла неподтверждённый TOTP, который мешал следующей
-  попытке. Чистите только незавершённые TOTP. Блокируйте повторный запуск
-  `boot()` и двойную отправку кода, пока проверка в процессе.
-- Если включить SQL до обновления панелей и привязки, старые сессии останутся
-  на `aal1`. RLS на чтении может вернуть пустой список без ошибки, поэтому
-  проверяйте доступ на заранее созданной записи.
-- Если переиспользовать JWT, захваченный до MFA, запросы будут идти с
-  `aal1` даже после верного кода. Запускайте загрузку и Realtime после MFA
-  и пересоздавайте старые подписки.
-- Строгая CSP может скрыть QR: ассет получает `data:image/svg+xml`. Проверьте
-  `img-src` и ручную привязку по ключу. Если действующая политика блокирует
-  inline-стили, перенесите стили шаблона во внешний CSS.
-- В шаблоне выход из формы вызывает `onSignOut`. Если интеграция не
-  перезагружает страницу, при адаптации завершайте ожидающий `ensure`
-  с `false`, чтобы следующий вход мог начать новый цикл.
+- An abandoned enrollment left an unverified TOTP factor that blocked the next attempt. Clean up only
+  unfinished TOTP factors. Prevent re-running `boot()` and double code submission while a check is in
+  progress.
+- If the SQL is switched on before the panels are updated and factors enrolled, old sessions stay at
+  `aal1`. RLS on reads can return an empty list without an error, so test access against a row you
+  created beforehand.
+- Reusing a JWT captured before MFA keeps requests at `aal1` even after a correct code. Start data
+  loading and Realtime after MFA and recreate old subscriptions.
+- A strict CSP can hide the QR code: the asset receives `data:image/svg+xml`. Check `img-src` and the
+  manual key enrollment. If the active policy blocks inline styles, move the template's styles into
+  external CSS.
+- In the template, leaving the form calls `onSignOut`. If your integration doesn't reload the page,
+  resolve the pending `ensure` with `false` when adapting it, so the next sign-in starts a new cycle.
 
-## Как проверить
+## How to verify
 
-В сценарии для `scripts/pg-harness/` ниже используются `public.staff(id, name,
-role)` и RLS на `public.orders`. Подготовьте одну запись заказа, которую
-оператор должен видеть. Если есть публичная политика чтения, выбирайте
-заказ или операцию, защищённые именно проверкой персонала.
+The `scripts/pg-harness/` scenario below uses `public.staff(id, name, role)` and RLS on
+`public.orders`. Prepare one order row the operator should see. If there is a public read policy,
+pick an order or operation protected specifically by the staff check.
 
 ```js
 export default async function (h) {
   const operator = await h.createUser({ email: "operator@example.com" });
   const outsider = await h.createUser({ email: "outsider@example.com" });
   await h.q(
-    "insert into public.staff (id, name, role) values ($1, 'Оператор', 'operator')",
+    "insert into public.staff (id, name, role) values ($1, 'Operator', 'operator')",
     [operator],
   );
   const sql = "select count(*)::int as n from public.orders";
@@ -213,16 +191,14 @@ export default async function (h) {
 }
 ```
 
-Добавьте проверки проекта на админскую RPC: оператор с `aal2` и
-администратор с `aal1` получают отказ, администратор с `aal2` выполняет
-операцию. Проверяйте фактический результат через публичную точку вызова.
+Add project checks for an admin RPC: an operator at `aal2` and an admin at `aal1` are rejected, an
+admin at `aal2` succeeds. Check the actual result through the public entry point.
 
 ```bash
 node "$HARNESS/harness.mjs" --repo "$PROJECT" --scenario "$CHECKS" --twice staff_mfa.sql
 ```
 
-`HARNESS` — копия `scripts/pg-harness/` после `sh setup.sh`, `PROJECT` —
-каталог проекта, `CHECKS` — путь к сценарию с подготовкой данных и проверками.
-Подставьте имя миграции. Стенд имитирует claims PostgREST. Отдельно в браузере
-проверьте первый вход с QR, повторный вход с кодом, отказ при неверном коде,
-выход, сброс фактора и повторную привязку.
+`HARNESS` is a copy of `scripts/pg-harness/` after `sh setup.sh`, `PROJECT` is the project
+directory, `CHECKS` is the scenario with data setup and checks. Substitute your migration name.
+The harness imitates PostgREST claims. Separately, test in a browser: first sign-in with the QR,
+re-sign-in with a code, rejection of a wrong code, sign-out, factor reset and re-enrollment.

@@ -4,8 +4,6 @@
 
 A Supabase project's URL and anon key are public. Anyone can open the browser console and call anything the `anon` and `authenticated` roles are allowed to, bypassing your site. BeeSting teaches the agent to find these holes in the database, close them with a migration, test the SQL locally before it goes to production, and bring the frontend up to a strict Content Security Policy.
 
-> The skill's instructions and reference docs are written in Russian. Claude reads them fine and answers in the user's language.
-
 ## What's inside
 
 | | |
@@ -39,7 +37,7 @@ node /tmp/pgh/harness.mjs --repo ./my-site --twice fix.sql --scenario checks.mjs
 node ~/.claude/skills/beesting/scripts/csp_scan.mjs ./my-site
 ```
 
-Sample harness report (the tool prints in Russian; translated here):
+Sample harness report:
 
 ```
 ✓ applied schema.sql

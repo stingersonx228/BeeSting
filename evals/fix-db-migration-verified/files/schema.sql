@@ -1,8 +1,8 @@
--- Pizza Napoli: базовая схема
+-- Pizza Napoli: base schema
 create table if not exists public.menu (
   id text primary key,
   name text not null,
-  price int not null check (price > 0),
+  price int not null check (price > 0), -- cents
   available boolean not null default true
 );
 alter table public.menu enable row level security;
@@ -15,7 +15,7 @@ create table if not exists public.orders (
   phone text not null,
   address text not null,
   items jsonb not null,
-  total int not null,
+  total int not null, -- cents
   status text not null default 'new',
   paid boolean not null default false
 );
@@ -49,5 +49,5 @@ begin
 end $$;
 
 insert into public.menu (id, name, price) values
-  ('margherita', 'Маргарита', 2900), ('pepperoni', 'Пепперони', 3400), ('quattro', 'Четыре сыра', 3800)
+  ('margherita', 'Margherita', 1290), ('pepperoni', 'Pepperoni', 1490), ('quattro', 'Quattro Formaggi', 1690)
 on conflict (id) do nothing;

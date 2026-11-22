@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Что мешает строгой CSP (script-src без 'unsafe-inline', script-src-attr 'none') на статическом сайте.
-// Без зависимостей. Использование: node csp_scan.mjs <каталог сайта> [--json]
-// Код выхода 1, если есть блокирующие находки (inline-скрипты, on*-атрибуты, javascript:, eval).
+// What blocks a strict CSP (script-src without 'unsafe-inline', script-src-attr 'none') on a static site.
+// No dependencies. Usage: node csp_scan.mjs <site directory> [--json]
+// Exit code 1 if there are blocking findings (inline scripts, on* attributes, javascript:, eval).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
 
@@ -32,7 +32,7 @@ for (const file of walk(root)) {
   if (isTest) continue;
 
   if (isHtml) {
-    // <script> без src с содержимым (кроме JSON-данных — они не исполняются)
+    // <script> without src that has a body (except JSON data blocks — they don't execute)
     for (const m of src.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
       const attrs = m[1];
       const body = m[2].trim();
@@ -40,10 +40,10 @@ for (const file of walk(root)) {
       if (/\bsrc\s*=/.test(attrs)) {
         const src_ = (attrs.match(/\bsrc\s*=\s*["']([^"']+)/i) || [])[1] || '';
         if (/^https?:\/\//i.test(src_)) {
-          if (!/\bintegrity\s*=/.test(attrs)) add(file, lineAt(src, m.index), 'cdn-no-sri', 'warn', `нет integrity: ${src_}`);
-          if (!/\bcrossorigin\b/i.test(attrs)) add(file, lineAt(src, m.index), 'cdn-no-crossorigin', 'warn', `нет crossorigin: ${src_}`);
+          if (!/\bintegrity\s*=/.test(attrs)) add(file, lineAt(src, m.index), 'cdn-no-sri', 'warn', `no integrity: ${src_}`);
+          if (!/\bcrossorigin\b/i.test(attrs)) add(file, lineAt(src, m.index), 'cdn-no-crossorigin', 'warn', `no crossorigin: ${src_}`);
           if (!/@\d+\.\d+\.\d+/.test(src_) && /(jsdelivr|unpkg|cdnjs|esm\.sh)/.test(src_))
-            add(file, lineAt(src, m.index), 'cdn-floating-version', 'warn', `версия не зафиксирована: ${src_}`);
+            add(file, lineAt(src, m.index), 'cdn-floating-version', 'warn', `version not pinned: ${src_}`);
         }
         continue;
       }
@@ -54,27 +54,25 @@ for (const file of walk(root)) {
     for (const m of src.matchAll(/<link\b[^>]*rel\s*=\s*["']?stylesheet[^>]*>/gi)) {
       const href = (m[0].match(/\bhref\s*=\s*["']([^"']+)/i) || [])[1] || '';
       if (/^https?:\/\//.test(href) && !/fonts\.googleapis\.com/.test(href) && !/\bintegrity\s*=/.test(m[0]))
-        add(file, lineAt(src, m.index), 'cdn-no-sri', 'warn', `нет integrity у стиля: ${href}`);
+        add(file, lineAt(src, m.index), 'cdn-no-sri', 'warn', `stylesheet has no integrity: ${href}`);
     }
     for (const m of src.matchAll(/<[a-z][^>]*?\s(on[a-z]+)\s*=\s*["'][^"']*["'][^>]*>/gi))
       add(file, lineAt(src, m.index), 'inline-handler', 'block', m[0]);
     for (const m of src.matchAll(/<style\b[^>]*>/gi))
-      add(file, lineAt(src, m.index), 'inline-style-block', 'info', 'блок <style> — нужен style-src \'unsafe-inline\' или вынос в .css');
+      add(file, lineAt(src, m.index), 'inline-style-block', 'info', '<style> block — needs style-src \'unsafe-inline\' or moving it into a .css file');
   }
 
-  // В JS и HTML: обработчики в строках шаблонов, javascript:-ссылки, eval
+  // In JS and HTML: handlers in template strings, javascript: URLs, eval
   const patterns = [
-    [/["'`][^"'`]*\son[a-z]+\s*=\s*\\?["'][^"'`]*/g, 'handler-in-template', 'block', 'on*-атрибут в HTML-строке (innerHTML) — заменить на addEventListener/делегирование'],
+    [/["'`][^"'`]*\son[a-z]+\s*=\s*\\?["'][^"'`]*/g, 'handler-in-template', 'block', 'on* attribute in an HTML string (innerHTML) — replace with addEventListener/delegation'],
     [/(?:href|src|action)\s*=\s*\\?["']\s*javascript:/gi, 'javascript-url', 'block', 'javascript: URL'],
-    [/\beval\s*\(|\bnew\s+Function\s*\(|setTimeout\s*\(\s*["'`]|setInterval\s*\(\s*["'`]/g, 'eval', 'block', 'eval/new Function/строка в таймере — нужен unsafe-eval'],
-    [/\.setAttribute\(\s*["']on[a-z]+["']/g, 'set-handler-attr', 'block', 'setAttribute("on…") — блокируется script-src-attr'],
+    [/\beval\s*\(|\bnew\s+Function\s*\(|setTimeout\s*\(\s*["'`]|setInterval\s*\(\s*["'`]/g, 'eval', 'block', 'eval/new Function/string timer — needs unsafe-eval'],
+    [/\.setAttribute\(\s*["']on[a-z]+["']/g, 'set-handler-attr', 'block', 'setAttribute("on…") — blocked by script-src-attr'],
   ];
-  if (!isHtml || true) {
-    for (const [re, kind, sev, note] of patterns) {
-      for (const m of src.matchAll(re)) {
-        if (isHtml && kind === 'handler-in-template') continue; // в HTML уже покрыто inline-handler
-        add(file, lineAt(src, m.index), kind, sev, `${note}: ${m[0]}`);
-      }
+  for (const [re, kind, sev, note] of patterns) {
+    for (const m of src.matchAll(re)) {
+      if (isHtml && kind === 'handler-in-template') continue; // in HTML this is already covered by inline-handler
+      add(file, lineAt(src, m.index), kind, sev, `${note}: ${m[0]}`);
     }
   }
 }
@@ -87,7 +85,7 @@ if (asJson) {
   findings.sort((a, b) => order[a.severity] - order[b.severity] || a.file.localeCompare(b.file) || a.line - b.line);
   const icon = { block: '✗', warn: '⚠', info: 'ℹ' };
   for (const f of findings) console.log(`${icon[f.severity]} ${f.file}:${f.line} [${f.kind}] ${f.text}`);
-  console.log(`\nБлокирующих: ${blocking.length}, предупреждений: ${findings.filter((f) => f.severity === 'warn').length}, инфо: ${findings.filter((f) => f.severity === 'info').length}`);
-  if (!blocking.length) console.log('Сайт готов к script-src без \'unsafe-inline\' и script-src-attr \'none\'.');
+  console.log(`\nBlocking: ${blocking.length}, warnings: ${findings.filter((f) => f.severity === 'warn').length}, info: ${findings.filter((f) => f.severity === 'info').length}`);
+  if (!blocking.length) console.log('The site is ready for script-src without \'unsafe-inline\' and script-src-attr \'none\'.');
 }
 process.exitCode = blocking.length ? 1 : 0;

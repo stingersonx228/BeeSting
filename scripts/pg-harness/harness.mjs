@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// Supabase-подобный Postgres 17 на локальной машине: применяет миграции проекта по порядку,
-// печатает аудит прав (RLS, SECURITY DEFINER, гранты, view) и прогоняет сценарии от имени
-// ролей anon / authenticated / service_role. Ничего не трогает в проде.
+// A Supabase-like Postgres 17 on your machine: applies the project's migrations in order,
+// prints a permissions audit (RLS, SECURITY DEFINER, grants, views) and runs scenarios as the
+// anon / authenticated / service_role roles. Never touches production.
 //
-//   node harness.mjs --repo <путь> [--migrations a.sql,b.sql | (порядок из DEPLOY.md/README.md)]
+//   node harness.mjs --repo <path> [--migrations a.sql,b.sql | (order from DEPLOY.md/README.md)]
 //                    [--twice x.sql,y.sql] [--scenario s.mjs] [--no-audit] [--json out.json] [--port 54329]
 //
-// Код выхода: 0 — миграции и сценарий прошли (находки аудита — это отчёт, не ошибка);
-//             1 — упала миграция, повтор или сценарий.
+// Exit code: 0 — migrations and scenario passed (audit findings are a report, not a failure);
+//            1 — a migration, a re-apply or the scenario failed.
 import EmbeddedPostgres from 'embedded-postgres';
 import pg from 'pg';
 import { readFileSync, rmSync, existsSync, mkdtempSync, writeFileSync, readdirSync } from 'node:fs';
@@ -16,10 +16,10 @@ import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 
-const HELP = `Использование:
+const HELP = `Usage:
   node harness.mjs --repo ../my-site
   node harness.mjs --repo ../my-site --migrations supabase.sql,fix.sql --twice fix.sql --scenario checks.mjs
-Без --migrations порядок берётся из нумерованного списка *.sql в DEPLOY.md / README.md / docs/*.md.`;
+Without --migrations, the order is taken from a numbered list of *.sql files in DEPLOY.md / README.md / docs/*.md.`;
 
 function parseArgs(argv) {
   const a = { repo: '.', migrations: null, twice: [], scenario: null, audit: true, json: null, port: 54329 };
@@ -28,7 +28,7 @@ function parseArgs(argv) {
     const k = argv[i];
     const v = () => {
       const val = argv[++i];
-      if (val === undefined) throw new Error(`нет значения для ${k}`);
+      if (val === undefined) throw new Error(`missing value for ${k}`);
       return val;
     };
     if (k === '--repo') a.repo = v();
@@ -39,13 +39,13 @@ function parseArgs(argv) {
     else if (k === '--json') a.json = v();
     else if (k === '--port') a.port = Number(v());
     else if (k === '--help' || k === '-h') { console.log(HELP); process.exit(0); }
-    else throw new Error(`неизвестный аргумент ${k}\n${HELP}`);
+    else throw new Error(`unknown argument ${k}\n${HELP}`);
   }
   a.repo = resolve(a.repo);
   return a;
 }
 
-// Порядок миграций из документации: строки вида "1. `supabase.sql`" или "2) fix.sql — ...".
+// Migration order from the docs: lines like "1. `supabase.sql`" or "2) fix.sql — ...".
 function migrationsFromDocs(repo) {
   const docs = ['DEPLOY.md', 'README.md', 'MIGRATIONS.md'].map((f) => join(repo, f));
   const docsDir = join(repo, 'docs');
@@ -63,13 +63,13 @@ function migrationsFromDocs(repo) {
 }
 
 const BOOTSTRAP = [
-  // Роли PostgREST/Supabase
+  // PostgREST / Supabase roles
   `do $$ begin create role anon nologin noinherit; exception when duplicate_object then null; end $$`,
   `do $$ begin create role authenticated nologin noinherit; exception when duplicate_object then null; end $$`,
   `do $$ begin create role service_role nologin noinherit bypassrls; exception when duplicate_object then null; end $$`,
   `create schema if not exists auth`,
   `create schema if not exists extensions`,
-  // auth.* как в Supabase: claims берутся из настроек сессии request.jwt.*
+  // auth.* as in Supabase: claims come from the request.jwt.* session settings
   `create or replace function auth.uid() returns uuid language sql stable as
      $$ select nullif(coalesce(current_setting('request.jwt.claim.sub', true),
                                current_setting('request.jwt.claims', true)::jsonb ->> 'sub'), '')::uuid $$`,
@@ -92,7 +92,7 @@ const BOOTSTRAP = [
   `do $$ begin create publication supabase_realtime; exception when duplicate_object then null; end $$`,
   `grant usage on schema public, auth, extensions to anon, authenticated, service_role`,
   `grant execute on all functions in schema auth to anon, authenticated, service_role`,
-  // Как в Supabase: на всё новое в public у anon/authenticated есть права, защищает только RLS.
+  // As in Supabase: anon/authenticated get rights on everything new in public; only RLS protects it.
   `alter default privileges in schema public grant all on tables to anon, authenticated, service_role`,
   `alter default privileges in schema public grant all on sequences to anon, authenticated, service_role`,
   `alter default privileges in schema public grant execute on functions to anon, authenticated, service_role`,
@@ -109,12 +109,12 @@ async function main() {
   let migrations = args.migrations;
   if (!migrations) {
     const fromDocs = migrationsFromDocs(args.repo);
-    if (!fromDocs) throw new Error('не нашёл порядок миграций: передайте --migrations a.sql,b.sql');
+    if (!fromDocs) throw new Error('could not find the migration order: pass --migrations a.sql,b.sql');
     migrations = fromDocs.list;
-    console.log(`Порядок миграций из ${fromDocs.source}`);
+    console.log(`Migration order from ${fromDocs.source}`);
   }
   const missing = [...migrations, ...args.twice].filter((f) => !existsSync(join(args.repo, f)));
-  if (missing.length) throw new Error(`нет файлов: ${missing.join(', ')}`);
+  if (missing.length) throw new Error(`files not found: ${missing.join(', ')}`);
 
   const dir = mkdtempSync(join(tmpdir(), 'pg-harness-'));
   const server = new EmbeddedPostgres({
@@ -132,7 +132,7 @@ async function main() {
   try {
     for (const s of BOOTSTRAP) await q(s);
     for (const ext of OPTIONAL_EXT) {
-      try { await q(`create extension if not exists "${ext}" with schema extensions`); } catch { /* нет в сборке */ }
+      try { await q(`create extension if not exists "${ext}" with schema extensions`); } catch { /* not in this build */ }
     }
     await q(`alter database postgres set search_path = "$user", public, extensions`);
     await q(`set search_path = "$user", public, extensions`);
@@ -145,14 +145,14 @@ async function main() {
         report.migrations.push({ file: f, ok: true, label });
       } catch (e) {
         const line = lineOf(sql, e.position);
-        console.log(`✗ ОШИБКА ${label} ${f}${line ? ':' + line : ''} → ${e.message}`);
+        console.log(`✗ ERROR ${label} ${f}${line ? ':' + line : ''} → ${e.message}`);
         report.migrations.push({ file: f, ok: false, label, error: e.message, line });
-        try { await q('rollback'); } catch { /* вне транзакции */ }
+        try { await q('rollback'); } catch { /* not in a transaction */ }
         throw e;
       }
     };
-    for (const f of migrations) await apply(f, 'применён');
-    for (const f of args.twice) await apply(f, 'повторно применён');
+    for (const f of migrations) await apply(f, 'applied');
+    for (const f of args.twice) await apply(f, 're-applied');
 
     if (args.audit) report.audit = await audit(q);
 
@@ -160,16 +160,16 @@ async function main() {
       const h = helpers(q, args.repo);
       const mod = await import(pathToFileURL(resolve(args.scenario)).href);
       const fn = mod.default ?? mod.run;
-      if (typeof fn !== 'function') throw new Error('сценарий должен экспортировать default async function (h)');
-      console.log('\n── Сценарий ' + args.scenario);
+      if (typeof fn !== 'function') throw new Error('the scenario must export default async function (h)');
+      console.log('\n── Scenario ' + args.scenario);
       await fn(h);
-      console.log('\nСЦЕНАРИЙ ПРОЙДЕН');
+      console.log('\nSCENARIO PASSED');
       report.scenario = { ok: true };
     }
   } catch (e) {
     failed = true;
     if (!report.migrations.some((m) => !m.ok)) {
-      console.log(`\n✗ ${e.code === 'ERR_ASSERTION' ? 'Проверка не прошла' : 'Ошибка'}: ${e.message}`);
+      console.log(`\n✗ ${e.code === 'ERR_ASSERTION' ? 'Check failed' : 'Error'}: ${e.message}`);
       report.scenario = { ok: false, error: e.message };
     }
   } finally {
@@ -181,7 +181,7 @@ async function main() {
   process.exitCode = failed ? 1 : 0;
 }
 
-// Помощники для сценариев: запросы от имени ролей с claims, как их выставляет PostgREST.
+// Scenario helpers: queries as a role with claims, the way PostgREST sets them.
 function helpers(q, repo) {
   const as = async (role, claims, sql, params) => {
     await q(`select set_config('request.jwt.claims', $1, false), set_config('request.jwt.claim.sub', $2, false),
@@ -194,7 +194,7 @@ function helpers(q, repo) {
     q, assert, repo,
     log: (...m) => console.log('✓', ...m),
     asAnon: (sql, params) => as('anon', { role: 'anon' }, sql, params),
-    // claims по умолчанию — обычный вход паролем (aal1); для 2FA передайте { aal: 'aal2' }
+    // default claims are a plain password sign-in (aal1); pass { aal: 'aal2' } for 2FA
     asUser: (uid, sql, params, claims = {}) =>
       as('authenticated', { sub: uid, role: 'authenticated', aal: 'aal1', ...claims }, sql, params),
     asService: (sql, params) => as('service_role', { role: 'service_role' }, sql, params),
@@ -203,7 +203,7 @@ function helpers(q, repo) {
         [fields.id ?? null, fields.email ?? null, fields.phone ?? null]);
       return r.rows[0].id;
     },
-    // ожидать отказ: await h.rejects(h.asAnon('select * from t'), /permission denied/)
+    // expect a rejection: await h.rejects(h.asAnon('select * from t'), /permission denied/)
     rejects: (promise, re) => assert.rejects(promise, re),
   };
 }
@@ -211,7 +211,7 @@ function helpers(q, repo) {
 async function audit(q) {
   const out = {};
   const section = (title, rows, fmt, hint) => {
-    console.log(`\n${rows.length ? '⚠' : '✓'} ${title}: ${rows.length || 'нет'}`);
+    console.log(`\n${rows.length ? '⚠' : '✓'} ${title}: ${rows.length || 'none'}`);
     for (const r of rows) console.log('   - ' + fmt(r));
     if (rows.length && hint) console.log('   → ' + hint);
   };
@@ -223,9 +223,9 @@ async function audit(q) {
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind in ('r','p') and not c.relrowsecurity
     order by 1`)).rows;
-  section('Таблицы public без RLS', out.rlsOff,
+  section('Tables in public without RLS', out.rlsOff,
     (r) => `${r.table}${r.anon_select || r.anon_write ? ' (anon: ' + [r.anon_select && 'select', r.anon_write && 'write'].filter(Boolean).join('+') + ')' : ''}`,
-    'enable row level security + политики, либо revoke all ... from anon, authenticated');
+    'enable row level security + policies, or revoke all ... from anon, authenticated');
 
   out.openPolicies = (await q(`
     select tablename as table, policyname as policy, cmd, roles::text as roles, qual, with_check
@@ -234,9 +234,9 @@ async function audit(q) {
       and (roles && array['public','anon','authenticated']::name[])
       and (coalesce(qual, '') = 'true' or coalesce(with_check, '') = 'true')
     order by 1, 2`)).rows;
-  section('Политики «true» для public/anon/authenticated', out.openPolicies,
+  section('"true" policies for public/anon/authenticated', out.openPolicies,
     (r) => `${r.table}.${r.policy} [${r.cmd} ${r.roles}] using=${r.qual ?? '-'} check=${r.with_check ?? '-'}`,
-    'для SELECT справочников это норма; для INSERT/UPDATE/DELETE — почти всегда дыра');
+    'fine for SELECT on a public catalog; for INSERT/UPDATE/DELETE almost always a hole');
 
   out.definerNoPath = (await q(`
     select p.oid::regprocedure::text as fn
@@ -244,8 +244,8 @@ async function audit(q) {
     where n.nspname = 'public' and p.prosecdef
       and not exists (select 1 from unnest(coalesce(p.proconfig, '{}')) c where c like 'search_path=%')
     order by 1`)).rows;
-  section('SECURITY DEFINER без set search_path', out.definerNoPath, (r) => r.fn,
-    'добавить set search_path = public, pg_temp (иначе подмена объектов через search_path)');
+  section('SECURITY DEFINER without set search_path', out.definerNoPath, (r) => r.fn,
+    'add set search_path = public, pg_temp (otherwise objects can be hijacked via search_path)');
 
   out.callable = (await q(`
     select p.oid::regprocedure::text as fn, p.prosecdef as definer,
@@ -259,12 +259,12 @@ async function audit(q) {
       and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
     order by p.prosecdef desc, 1`)).rows;
   const tag = (r) => [r.anon ? 'anon' : null, r.authed ? 'authenticated' : null].filter(Boolean).join('+')
-    + (r.via_public ? ', через PUBLIC' : '') + (r.definer ? ', DEFINER' : '')
-    + (r.definer && !r.checks_identity ? ', без проверки личности' : '');
-  section('Функции, доступные через /rest/v1/rpc (проверить каждую)', out.callable, (r) => `${r.fn} — ${tag(r)}`,
+    + (r.via_public ? ', via PUBLIC' : '') + (r.definer ? ', DEFINER' : '')
+    + (r.definer && !r.checks_identity ? ', no identity check' : '');
+  section('Functions callable via /rest/v1/rpc (review each one)', out.callable, (r) => `${r.fn} — ${tag(r)}`,
     out.callable.some((r) => r.via_public)
-      ? 'EXECUTE по умолчанию выдан PUBLIC: revoke ... from public, anon, authenticated, затем grant нужным ролям'
-      : 'у каждой: кто может вызвать, что проверяет внутри (личность, владение строкой, лимиты), что возвращает');
+      ? 'EXECUTE is granted to PUBLIC by default: revoke ... from public, anon, authenticated, then grant to the roles that need it'
+      : 'for each: who can call it, what it checks inside (identity, row ownership, limits), what it returns');
 
   out.views = (await q(`
     select c.relname as view,
@@ -274,9 +274,9 @@ async function audit(q) {
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind in ('v','m')
     order by 1`)).rows.filter((r) => r.invoker !== 'true' && (r.anon_select || r.authed_select));
-  section('View без security_invoker, читаемые anon/authenticated (обходят RLS)', out.views,
+  section('Views without security_invoker readable by anon/authenticated (bypass RLS)', out.views,
     (r) => `${r.view} (${[r.anon_select && 'anon', r.authed_select && 'authenticated'].filter(Boolean).join('+')})`,
-    'alter view ... set (security_invoker = true) или revoke select ... from anon, authenticated');
+    'alter view ... set (security_invoker = true) or revoke select ... from anon, authenticated');
 
   out.anonWrite = (await q(`
     select distinct c.relname as table, p.cmd
@@ -286,12 +286,12 @@ async function audit(q) {
       and (p.roles && array['public','anon']::name[])
       and has_table_privilege('anon', c.oid, 'insert,update,delete')
     order by 1, 2`)).rows;
-  section('Таблицы, куда anon может писать напрямую', out.anonWrite, (r) => `${r.table} [${r.cmd}]`,
-    'запись с сайта лучше вести через RPC с валидацией и лимитами, а прямые права отозвать');
+  section('Tables anon can write to directly', out.anonWrite, (r) => `${r.table} [${r.cmd}]`,
+    'route writes from the site through an RPC with validation and limits, and revoke the direct rights');
 
   out.realtime = (await q(`select tablename as table from pg_publication_tables where pubname = 'supabase_realtime' order by 1`)).rows;
-  console.log(`\nℹ Таблицы в supabase_realtime: ${out.realtime.map((r) => r.table).join(', ') || 'нет'}`
-    + (out.realtime.length ? ' — подписчики видят строки по тем же SELECT-политикам' : ''));
+  console.log(`\nℹ Tables in supabase_realtime: ${out.realtime.map((r) => r.table).join(', ') || 'none'}`
+    + (out.realtime.length ? ' — subscribers see rows under the same SELECT policies' : ''));
   return out;
 }
 

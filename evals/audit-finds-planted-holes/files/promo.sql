@@ -1,4 +1,4 @@
--- Pizza Napoli: промокоды
+-- Pizza Napoli: promo codes
 create table if not exists public.promo_codes (
   code text primary key,
   discount int not null check (discount between 1 and 50),

@@ -1,116 +1,117 @@
-# Аудит Supabase: что искать и как чинить
+# Supabase audit: what to look for and how to fix it
 
-Модель угроз: anon key и URL проекта публичны, их видит любой в DevTools. Всё, что
-разрешено роли `anon` (и `authenticated` после бесплатной регистрации), атакующий может
-вызвать напрямую через `/rest/v1/...` и `/rest/v1/rpc/...` в обход сайта. Поэтому вся защита
-живёт в базе: RLS, гранты и проверки внутри функций. Проверки на клиенте — только для UX.
+Threat model: the anon key and project URL are public — anyone can see them in DevTools.
+Everything granted to `anon` (and to `authenticated`, after a free sign-up) can be called
+directly through `/rest/v1/...` and `/rest/v1/rpc/...`, bypassing the site. So all protection
+lives in the database: RLS, grants and checks inside functions. Client-side checks are UX only.
 
-## Содержание
-1. Права на таблицы и RLS
-2. Функции (RPC) и SECURITY DEFINER
-3. View и realtime
-4. Бизнес-логика: деньги, лимиты, идемпотентность
-5. Клиентский код
-6. Персонал: роли и 2FA
-7. Шаблон миграции-исправления
+## Contents
+1. Table permissions and RLS
+2. Functions (RPC) and SECURITY DEFINER
+3. Views and realtime
+4. Business logic: money, limits, idempotency
+5. Client code
+6. Staff: roles and 2FA
+7. Fix-migration template
 
-## 1. Права на таблицы и RLS
+## 1. Table permissions and RLS
 
-В Supabase на всё, что создано в `public`, по умолчанию выданы права `anon`, `authenticated`,
-`service_role` (default privileges). Значит:
+In Supabase, everything created in `public` is granted to `anon`, `authenticated` and
+`service_role` by default (default privileges). Therefore:
 
-- Таблица без `enable row level security` полностью открыта на чтение и запись.
-- RLS включён, но нет политик: всё закрыто (это нормально для служебных таблиц).
-- При RLS чужие строки дают «0 строк», а не ошибку. «permission denied» бывает только после `revoke`.
-- Политика `using (true)` на SELECT подходит для публичного справочника (меню). На
-  INSERT/UPDATE/DELETE для anon это почти всегда дыра.
-- `with check` нужен у INSERT/UPDATE, иначе пользователь запишет строку «от чужого имени»
-  (подменит `user_id`, `status`, `price`).
-- Колонки: RLS работает построчно. Если anon должен видеть строку, но не телефон, нужен
-  отдельный RPC или view с `security_invoker`, либо `revoke select (phone)`/грант по колонкам.
+- A table without `enable row level security` is fully open for reading and writing.
+- RLS enabled but no policies: everything is closed (fine for internal tables).
+- With RLS, other people's rows return "0 rows", not an error. "permission denied" only appears after a `revoke`.
+- A `using (true)` policy on SELECT is fine for a public catalog (a menu). On
+  INSERT/UPDATE/DELETE for anon it is almost always a hole.
+- INSERT/UPDATE need `with check`; otherwise a user can write a row "on someone else's behalf"
+  (forge `user_id`, `status`, `price`).
+- Columns: RLS works per row. If anon may see a row but not the phone number, you need a
+  separate RPC, a view with `security_invoker`, or `revoke select (phone)` / column-level grants.
 
-Служебная таблица, к которой ходят только функции:
+An internal table that only functions touch:
 ```sql
 alter table public.x enable row level security;
 revoke all on public.x from public, anon, authenticated;
 ```
 
-## 2. Функции (RPC) и SECURITY DEFINER
+## 2. Functions (RPC) and SECURITY DEFINER
 
-- `EXECUTE` на новые функции по умолчанию есть у роли `PUBLIC`. Одного `revoke ... from anon`
-  мало: anon наследует от PUBLIC. Правильно так:
+- New functions grant `EXECUTE` to the `PUBLIC` role by default. `revoke ... from anon` alone is
+  not enough — anon inherits from PUBLIC. Do this:
   ```sql
   revoke execute on function public.f(args) from public, anon, authenticated;
-  grant  execute on function public.f(args) to authenticated;   -- кому реально нужно
+  grant  execute on function public.f(args) to authenticated;   -- whoever actually needs it
   ```
-  Сигнатура в `revoke/grant` должна точно совпадать с аргументами (`public.f(text, int)`).
-- `security definer` выполняется с правами владельца (postgres) и обходит RLS. Каждой такой
-  функции нужно `set search_path = public, pg_temp`, иначе подмена объектов через search_path.
-- Внутри definer-функции проверяйте личность явно: `auth.uid()`, `public.is_staff(auth.uid())`,
-  владение строкой (`where courier_id = auth.uid()`), секрет-токен (`where track_token = p_token`).
-- Доступ по токену из ссылки: только `uuid`/случайный ≥128 бит, не порядковый номер заказа.
-  Возвращайте минимум полей (без телефона/адреса, если трекинг публичен).
-- Меняете тип возврата: `create or replace` не сработает, нужно `drop function ...; create function ...`
-  и заново выдать гранты (они пропадают вместе с функцией).
-- Ошибки: `raise exception 'too many orders'` — короткий машинный код, клиент сам переводит его в
-  понятный текст. Не возвращайте наружу SQL-детали.
+  The signature in `revoke/grant` must match the arguments exactly (`public.f(text, int)`).
+- `security definer` runs with the owner's (postgres) rights and bypasses RLS. Every such function
+  needs `set search_path = public, pg_temp`, otherwise objects can be hijacked through search_path.
+- Inside a definer function, check identity explicitly: `auth.uid()`,
+  `public.is_staff(auth.uid())`, row ownership (`where courier_id = auth.uid()`), a secret token
+  (`where track_token = p_token`).
+- Access by a token from a link: only a `uuid` / random ≥128 bits, never a sequential order number.
+  Return the minimum fields (no phone/address if tracking is public).
+- Changing the return type: `create or replace` won't do it — you need
+  `drop function ...; create function ...` and must re-grant (grants are dropped with the function).
+- Errors: `raise exception 'too many orders'` — a short machine code that the client translates
+  into friendly text. Don't leak SQL details.
 
-## 3. View и realtime
+## 3. Views and realtime
 
-- View, созданная postgres, по умолчанию выполняется с правами владельца и обходит RLS.
-  Postgres 15+: `alter view public.v set (security_invoker = true);` или отзовите select у anon.
-- Realtime (`postgres_changes`) отдаёт строки по тем же SELECT-политикам. Таблица в публикации
-  `supabase_realtime` с широкой SELECT-политикой выдаёт все изменения всем подписчикам.
+- A view created by postgres runs with the owner's rights by default and bypasses RLS.
+  Postgres 15+: `alter view public.v set (security_invoker = true);` or revoke select from anon.
+- Realtime (`postgres_changes`) delivers rows under the same SELECT policies. A table in the
+  `supabase_realtime` publication with a broad SELECT policy streams every change to every subscriber.
 
-## 4. Бизнес-логика: деньги, лимиты, идемпотентность
+## 4. Business logic: money, limits, idempotency
 
-- Цена, скидка, итог, статус — только на сервере. Клиент присылает `id` и `qty`, функция
-  берёт цены из таблицы, проверяет `available`, минимальную сумму, длину корзины (1–100 строк),
-  `qty` (1–50), длины строк (имя, адрес, комментарий).
-- Лимиты частоты внутри RPC: N заказов на номер за окно, общий потолок за окно.
-  От гонок защищают advisory lock на ключ (`pg_advisory_xact_lock(<namespace>, hashtext(key))`)
-  и счётчик по индексу (`created_at`, нормализованный телефон).
-- Нормализуйте телефон одной функцией (`phone_key(text)` → только цифры, 8→7) и сравнивайте
-  везде через неё: промокоды «на номер», лимиты, рефералки.
-- Идемпотентность: клиент шлёт `client_key uuid`, частичный уникальный индекс плюс advisory lock.
-  Повтор возвращает уже созданный заказ, а не второй (таймауты, двойной клик).
-- Промокоды и призы: проверка и погашение в одной транзакции (`update ... where used = false
-  returning`), привязка к телефону владельца, одноразовость, срок действия.
-- Статусы: переходы только разрешённые (`new→accepted→...`), а роль проверяется на каждом шаге.
+- Price, discount, total and status are computed on the server only. The client sends `id` and
+  `qty`; the function takes prices from the table and checks `available`, the minimum order,
+  cart length (1–100 lines), `qty` (1–50) and string lengths (name, address, comment).
+- Rate limits inside the RPC: N orders per phone per window, a global ceiling per window.
+  Races are prevented by an advisory lock on the key (`pg_advisory_xact_lock(<namespace>, hashtext(key))`)
+  and an indexed counter (`created_at`, normalized phone).
+- Normalize phone numbers with one function (`phone_key(text)` → digits only, local prefix
+  normalized) and compare through it everywhere: per-phone promo codes, limits, referrals.
+- Idempotency: the client sends a `client_key uuid`; a partial unique index plus an advisory lock.
+  A retry returns the existing order instead of creating a second one (timeouts, double clicks).
+- Promo codes and prizes: validation and redemption in one transaction (`update ... where used = false
+  returning`), bound to the owner's phone, single use, expiry date.
+- Statuses: only allowed transitions (`new→accepted→...`), and the role is checked at every step.
 
-## 5. Клиентский код
+## 5. Client code
 
-- `service_role` ключ не должен попадать на клиент (grep `service_role`, `eyJ` с role service).
-- Прямые `.from('orders').insert/update` с сайта переводите в RPC с валидацией.
-- Запросы supabase-js ленивые: `sb.rpc(...)` / `sb.from(...).update(...)` без `await` или `.then()`
-  не выполняются. Поиск: вызовы, результат которых не ожидается и не возвращается.
-- Проверяйте `error` у каждого вызова, иначе сбой выглядит как «пусто».
-- XSS: данные пользователей (имя, адрес, комментарий, отзыв) в `innerHTML` — только через
-  экранирование (`esc()`), либо `textContent`. Особенно в панелях персонала: XSS там = захват сессии
-  оператора.
-- Персональные данные не кладите в URL (query, `wa.me?text=`, аналитика): они оседают в логах
-  и Referer. Для страниц с токеном: `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
-- Storage: публичные бакеты видны всем; загрузка — с политиками на `storage.objects`.
+- The `service_role` key must never reach the client (grep for `service_role`, an `eyJ` JWT with role service).
+- Move direct `.from('orders').insert/update` calls from the site into an RPC with validation.
+- supabase-js queries are lazy: `sb.rpc(...)` / `sb.from(...).update(...)` without `await` or
+  `.then()` never execute. Look for calls whose result is neither awaited nor returned.
+- Check `error` on every call; otherwise a failure looks like "empty".
+- XSS: user data (name, address, comment, review) goes into `innerHTML` only through escaping
+  (`esc()`), or use `textContent`. Especially in staff panels: XSS there means hijacking an
+  operator's session.
+- Don't put personal data in URLs (query strings, `wa.me?text=`, analytics): it ends up in logs
+  and the Referer. For pages with a token: `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
+- Storage: public buckets are visible to everyone; uploads need policies on `storage.objects`.
 
-## 6. Персонал: роли и 2FA
+## 6. Staff: roles and 2FA
 
-- Одна функция-источник истины: `is_staff(uid)`, `is_admin(uid)` (definer, search_path), все
-  политики и RPC персонала вызывают её. Тогда усиление (например 2FA) делается в одном месте.
-- 2FA (TOTP через Supabase MFA): в `is_staff/is_admin` добавить
-  `coalesce(auth.jwt() ->> 'aal', '') = 'aal2'`. Порядок выкатки — в `staff-mfa.md`.
-- Регистрация открыта (Auth → Email signup): любой получает роль `authenticated`. Поэтому всё,
-  что выдано `authenticated`, должно само проверять, что это сотрудник или владелец строки.
+- One source of truth: `is_staff(uid)`, `is_admin(uid)` (definer, search_path); every staff policy
+  and RPC calls it. Then hardening (e.g. 2FA) happens in one place.
+- 2FA (TOTP via Supabase MFA): add `coalesce(auth.jwt() ->> 'aal', '') = 'aal2'` to
+  `is_staff/is_admin`. Rollout order is in `staff-mfa.md`.
+- Sign-up is open (Auth → Email signup): anyone gets the `authenticated` role. So everything
+  granted to `authenticated` must itself verify that the caller is staff or owns the row.
 
-## 7. Шаблон миграции-исправления
+## 7. Fix-migration template
 
-Применённые миграции не редактируйте: владелец базы уже их выполнил. Новый файл применяется последним.
+Don't edit applied migrations: the database owner has already run them. The new file is applied last.
 
 ```sql
 -- ============================================================================
---  <проект> — <что чиним, одной строкой>.
---  Применять после <последний файл>. Идемпотентен — можно запускать повторно.
---  Что меняется для сайта: <какие версии клиента совместимы, порядок выкатки>.
---  Откат: <команда или файл>.
+--  <project> — <what we fix, one line>.
+--  Apply after <last file>. Idempotent — safe to run again.
+--  What changes for the site: <which client versions are compatible, rollout order>.
+--  Rollback: <command or file>.
 -- ============================================================================
 begin;
 
@@ -133,5 +134,5 @@ grant  execute on function public.f(text) to anon;
 commit;
 ```
 
-Обязательно: прогон на стенде (`sql-verification.md`) со всеми предыдущими миграциями,
-повторное применение файла и сценарии «чужой не может / свой может».
+Mandatory: a harness run (`sql-verification.md`) with all previous migrations, applying the file
+a second time, and "a stranger can't / the owner can" scenarios.

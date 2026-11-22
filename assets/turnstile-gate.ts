@@ -1,13 +1,13 @@
-// Антиспам-шлюз (Supabase Edge Function): проверяет токен Cloudflare Turnstile и только потом
-// вызывает RPC из белого списка ACTIONS с сервисным ключом. После lock-миграции
-// (revoke execute ... from public, anon, authenticated) эти RPC с anon-ключом напрямую не вызвать.
-// Подставьте свои действия в ACTIONS: имя действия = action виджета Turnstile на сайте.
+// Anti-spam gate (Supabase Edge Function): verifies a Cloudflare Turnstile token and only then
+// calls an allow-listed RPC from ACTIONS with the service key. After the lock migration
+// (revoke execute ... from public, anon, authenticated) these RPCs can't be called directly with the anon key.
+// Put your own actions into ACTIONS: action name = the Turnstile widget's action on the site.
 //
-// Секреты (Supabase → Edge Functions → Secrets):
-//   TURNSTILE_SECRET_KEY — секретный ключ виджета Turnstile (обязательно)
-//   ALLOWED_ORIGINS      — сайты, с которых разрешены запросы, через запятую,
-//                          напр. "https://my-site.vercel.app" (обязательно)
-// SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY Supabase подставляет сам.
+// Secrets (Supabase → Edge Functions → Secrets):
+//   TURNSTILE_SECRET_KEY — the Turnstile widget's secret key (required)
+//   ALLOWED_ORIGINS      — comma-separated sites allowed to call the gate,
+//                          e.g. "https://my-site.vercel.app" (required)
+// Supabase provides SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY itself.
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -23,7 +23,7 @@ const MAX_BODY = 16 * 1024;
 type Body = Record<string, unknown>;
 type Action = { rpc: string; args: (b: Body) => Record<string, unknown> | null };
 
-// Белый список действий: только эти RPC и только с проверенными аргументами.
+// Allow-list of actions: only these RPCs, and only with validated arguments.
 const ACTIONS: Record<string, Action> = {
   order: {
     rpc: "place_order",
@@ -67,7 +67,7 @@ async function verifyTurnstile(token: string, ip: string | null, action: string)
     const v = await r.json();
     if (v?.success !== true) return false;
     if (v.action !== action) return false;
-    if (ALLOWED_HOSTS.length && !ALLOWED_HOSTS.includes(v.hostname)) return false;
+    if (!ALLOWED_HOSTS.includes(v.hostname)) return false; // strict: an empty list blocks everything
     return true;
   } catch {
     return false;
@@ -98,7 +98,8 @@ Deno.serve(async (req) => {
   const name = typeof body.action === "string" ? body.action : "";
   const action = Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
   const token = typeof body.token === "string" ? body.token : "";
-  if (!action || !token || token.length > 2048) return reply({ message: "bad request" }, 400, origin);
+  if (!action || token.length > 2048) return reply({ message: "bad request" }, 400, origin);
+  if (!token) return reply({ message: "captcha required" }, 403, origin);
 
   const args = action.args(body);
   if (!args) return reply({ message: "bad request" }, 400, origin);
@@ -120,7 +121,7 @@ Deno.serve(async (req) => {
   });
   const data = await r.json().catch(() => null);
   if (!r.ok) {
-    // Наружу — только текст ошибки бизнес-логики (лимиты, минимальная сумма и т.п.).
+    // Only the business-logic error text goes out (limits, minimum order, etc.).
     const message = typeof data?.message === "string" ? data.message.slice(0, 200) : "request failed";
     return reply({ message }, r.status >= 500 ? 502 : 400, origin);
   }

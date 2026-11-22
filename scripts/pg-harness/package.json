@@ -2,7 +2,7 @@
   "name": "pg-harness",
   "private": true,
   "type": "module",
-  "description": "Supabase-подобный Postgres 17 для локальной проверки миграций",
+  "description": "Supabase-like Postgres 17 for verifying migrations locally",
   "dependencies": {
     "embedded-postgres": "17.11.0-beta.19",
     "pg": "8.13.1"

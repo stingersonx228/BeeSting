@@ -1,24 +1,23 @@
-# CSP и SRI для статического сайта
+# CSP and SRI for a static site
 
-Цель — браузер загружает JavaScript из явно разрешённых источников, блокирует
-исполняемые inline-скрипты и HTML-обработчики, а файлы с CDN проверяет по хэшу.
-CSP снижает риск XSS. Динамические данные по-прежнему вставляйте через
-`textContent` и DOM API или экранируйте по контексту. Права доступа к данным
-проверяйте в Supabase по `references/supabase-audit.md`.
+Goal: the browser loads JavaScript only from explicitly allowed sources, blocks executable inline
+scripts and HTML event handlers, and verifies CDN files by hash. CSP reduces XSS risk. Keep
+inserting dynamic data with `textContent` and DOM APIs, or escape it for its context. Check data
+access permissions in Supabase per `references/supabase-audit.md`.
 
-## Содержание
+## Contents
 
-- [Целевая политика](#целевая-политика)
-- [Перевод и выкатка](#перевод-и-выкатка)
-- [CDN и SRI](#cdn-и-sri)
-- [Остальные заголовки](#остальные-заголовки)
-- [Грабли](#грабли)
-- [Как проверить](#как-проверить)
+- [Target policy](#target-policy)
+- [Migration and rollout](#migration-and-rollout)
+- [CDN and SRI](#cdn-and-sri)
+- [Other headers](#other-headers)
+- [Pitfalls](#pitfalls)
+- [How to verify](#how-to-verify)
 
-## Целевая политика
+## Target policy
 
-Пример `vercel.json` для сайта с Supabase, Leaflet, Google Fonts и Turnstile.
-Подставьте свой `<project-ref>`. Уберите источники компонентов, которых у вас нет.
+Example `vercel.json` for a site with Supabase, Leaflet, Google Fonts and Turnstile.
+Put in your own `<project-ref>`. Remove sources for components you don't use.
 
 ```json
 {
@@ -48,76 +47,76 @@ CSP снижает риск XSS. Динамические данные по-пр
 }
 ```
 
-| Директива | Зачем |
+| Directive | Why |
 |---|---|
-| `default-src 'self'` | Запасное правило для типов ресурсов без отдельной директивы. Явная директива заменяет этот список целиком. |
-| `base-uri 'none'` | Запрещает `<base>`, который меняет разрешение относительных URL. |
-| `frame-ancestors 'none'` | Запрещает встраивать страницу сайта во фрейм. Передавайте в HTTP-заголовке. |
-| `object-src 'none'` | Запрещает загрузку через `<object>` и `<embed>`. |
-| `script-src` | Разрешает локальные JS, указанные каталоги CDN и SDK Turnstile. Без `'unsafe-inline'` блокирует исполняемые inline-скрипты, без `'unsafe-eval'` — компиляцию JS из строк. |
-| `script-src-attr 'none'` | Блокирует `onclick`, `onchange`, `onerror` и остальные HTML-обработчики, в том числе вставленные после загрузки страницы. |
-| `style-src` | Разрешает локальный CSS, CSS карты и Google Fonts. `'unsafe-inline'` оставлен для `<style>`, атрибутов `style=` и библиотек, которые их создают. Разрешение действует только на стили. |
-| `font-src` | Разрешает файлы шрифтов с сайта и `fonts.gstatic.com`. CSS Google Fonts загружается по `style-src` с другого хоста. |
-| `img-src` | Разрешает локальные изображения, `data:` для встроенных картинок, тайлы и иконки Leaflet из его CSS. Оставьте только фактические хосты тайлов. Для изображений из Supabase Storage добавьте их источник сюда. |
-| `frame-src` | Разрешает странице загружать iframe Turnstile. На страницах без внешних фреймов можно задать `'none'`. |
-| `connect-src` | HTTPS нужен для Auth, REST, RPC и Edge Functions, WSS — для Realtime. Если сайт делает `fetch` на свой origin, добавьте `'self'`. |
-| `form-action 'self'` | Ограничивает отправку HTML-форм своим origin. Запросы через `fetch` регулирует `connect-src`. |
-| `upgrade-insecure-requests` | Переводит небезопасные URL ресурсов на HTTPS. Если источник не обслуживает HTTPS, загрузка всё равно упадёт. |
+| `default-src 'self'` | Fallback for resource types without their own directive. An explicit directive replaces this list entirely. |
+| `base-uri 'none'` | Forbids `<base>`, which changes how relative URLs resolve. |
+| `frame-ancestors 'none'` | Forbids embedding the site's pages in a frame. Must be sent as an HTTP header. |
+| `object-src 'none'` | Forbids loading via `<object>` and `<embed>`. |
+| `script-src` | Allows local JS, the listed CDN directories and the Turnstile SDK. Without `'unsafe-inline'` it blocks executable inline scripts; without `'unsafe-eval'` it blocks compiling JS from strings. |
+| `script-src-attr 'none'` | Blocks `onclick`, `onchange`, `onerror` and every other HTML handler attribute, including ones inserted after page load. |
+| `style-src` | Allows local CSS, map CSS and Google Fonts. `'unsafe-inline'` is kept for `<style>`, `style=` attributes and libraries that create them. It only affects styles. |
+| `font-src` | Allows font files from the site and `fonts.gstatic.com`. Google Fonts CSS loads under `style-src` from a different host. |
+| `img-src` | Allows local images, `data:` for inline images, map tiles and Leaflet icons from its CSS. Keep only the tile hosts you actually use. Add your Supabase Storage origin here if you serve images from it. |
+| `frame-src` | Allows the Turnstile iframe. Pages without external frames can use `'none'`. |
+| `connect-src` | HTTPS is needed for Auth, REST, RPC and Edge Functions; WSS for Realtime. If the site `fetch`es its own origin, add `'self'`. |
+| `form-action 'self'` | Restricts HTML form submission to your origin. `fetch` requests are governed by `connect-src`. |
+| `upgrade-insecure-requests` | Upgrades insecure resource URLs to HTTPS. If a source doesn't serve HTTPS, loading still fails. |
 
-Фолбэк `default-src` не задаёт `base-uri`, `frame-ancestors` и `form-action`.
-Для ужесточения CSS вынесите `<style>` в файлы, замените `style=` классами и
-проверьте карту, всплывающие окна и анимации. Присваивание отдельных свойств
-через `element.style` и установка атрибута `style` целиком ведут себя по-разному.
-[Спецификация CSP](https://w3c.github.io/webappsec-csp/)
+The `default-src` fallback does not cover `base-uri`, `frame-ancestors` or `form-action`.
+To tighten CSS as well, move `<style>` into files, replace `style=` with classes and check the
+map, popups and animations. Assigning individual properties via `element.style` and setting the
+whole `style` attribute behave differently under CSP.
+[CSP specification](https://w3c.github.io/webappsec-csp/)
 
-Turnstile требует `https://challenges.cloudflare.com` и в `script-src`, и в
-`frame-src`. В режиме pre-clearance добавьте `'self'` в `connect-src` для
-запроса на `/cdn-cgi/`. Серверная проверка токена из `assets/turnstile-gate.ts`
-выполняется в Edge Function. CSP страницы на этот запрос не влияет.
-[Cloudflare Turnstile и CSP](https://developers.cloudflare.com/turnstile/reference/content-security-policy/)
+Turnstile needs `https://challenges.cloudflare.com` in both `script-src` and `frame-src`. In
+pre-clearance mode, add `'self'` to `connect-src` for the request to `/cdn-cgi/`. Server-side
+token verification from `assets/turnstile-gate.ts` happens in the Edge Function; the page's CSP
+does not affect it.
+[Cloudflare Turnstile and CSP](https://developers.cloudflare.com/turnstile/reference/content-security-policy/)
 
-## Перевод и выкатка
+## Migration and rollout
 
-1. **Снимите исходный список.** Из корня скилла запустите:
+1. **Take a baseline.** From the skill root, run:
 
    ```sh
    node scripts/csp_scan.mjs /path/to/site
    node scripts/csp_scan.mjs /path/to/site --json
    ```
 
-   Код 1 означает блокирующие находки. Предупреждения по CDN разберите отдельно.
-   Сканер эвристический и пропускает тесты и ряд выходных каталогов, включая
-   `dist` при обходе. Если публикуется сборка, передайте её каталог явно.
-   Вручную проверьте import map, динамически созданные скрипты и HTML из шаблонов.
+   Exit code 1 means blocking findings. Review CDN warnings separately. The scanner is heuristic
+   and skips tests and several output directories, including `dist`. If you publish a build,
+   pass its directory explicitly. Manually check import maps, dynamically created scripts and
+   HTML produced by templates.
 
-2. **Вынесите исполняемые `<script>…</script>`.** Перенесите код по страницам
-   в `admin.js`, `track.js` и т. п. Сохраните порядок загрузки. Например,
-   в конце `<body>` сначала идут зависимости и конфиг, затем код страницы:
+2. **Move executable `<script>…</script>` blocks out.** Put the code into per-page files —
+   `admin.js`, `track.js` and so on. Keep the load order. For example, at the end of `<body>`,
+   dependencies and config first, then the page code:
 
    ```html
    <script src="./config.js"></script>
    <script src="./admin.js"></script>
    ```
 
-   Если переносите обычные скрипты в `<head>`, поставьте `defer` всем звеньям
-   цепочки в нужном порядке. `async` порядка не гарантирует. При переходе на
-   `type="module"` проверьте явные импорты и обращения к глобальным переменным.
+   If you move classic scripts into `<head>`, give every link in the chain `defer` in the right
+   order. `async` does not guarantee order. When switching to `type="module"`, check explicit
+   imports and references to globals.
 
-3. **Уберите HTML-обработчики.** Проверьте страницы и строки, которые попадают в
-   `innerHTML` или `insertAdjacentHTML`. В шаблоне замените `onclick` на
-   `data-act` и `data-id`, а `onchange` — на `data-filter` и слушатель
-   `change`. Вызов `setAttribute('onclick', '...')` создаёт тот же запрещённый
-   атрибут. Функция, переданная в `addEventListener`, загружается из разрешённого JS.
+3. **Remove HTML event handlers.** Check pages and strings that end up in `innerHTML` or
+   `insertAdjacentHTML`. In templates replace `onclick` with `data-act` and `data-id`, and
+   `onchange` with `data-filter` plus a `change` listener. `setAttribute('onclick', '...')`
+   creates the same forbidden attribute. A function passed to `addEventListener` comes from
+   allowed JS and is fine.
 
-4. **Делегируйте события на стабильном контейнере.** Кнопки внутри контейнера
-   можно перерисовывать через `innerHTML`. Слушатель остаётся на самом
-   контейнере, а `closest` находит кнопку и при клике по вложенной иконке.
+4. **Delegate events to a stable container.** Buttons inside the container can be re-rendered
+   with `innerHTML`. The listener stays on the container, and `closest` finds the button even when
+   a nested icon is clicked.
 
    ```html
    <section id="orders">
      <article data-order>
-       <button type="button" data-act="details" data-id="42">Подробнее</button>
-       <p data-details hidden>Заказ принят</p>
+       <button type="button" data-act="details" data-id="42">Details</button>
+       <p data-details hidden>Order accepted</p>
      </article>
    </section>
    ```
@@ -136,10 +135,9 @@ Turnstile требует `https://challenges.cloudflare.com` и в `script-src`,
    });
    ```
 
-   Для нескольких действий используйте явные ветки по `dataset.act`. При
-   запросе к RPC валидируйте `dataset.id` и проверяйте права на сервере.
-   Для `error` на картинках нужна фаза захвата. Установите слушатель до
-   первой отрисовки карточек:
+   For several actions use explicit branches on `dataset.act`. When calling an RPC, validate
+   `dataset.id` and check permissions on the server. Image `error` events need the capture
+   phase. Install the listener before the first render of the cards:
 
    ```js
    document.addEventListener('error', event => {
@@ -147,44 +145,40 @@ Turnstile требует `https://challenges.cloudflare.com` и в `script-src`,
      if (!(image instanceof HTMLImageElement)) return;
      const media = image.parentElement;
      if (!media?.matches('.card-media')) return;
-     media.classList.add('no-image'); // класс показывает заглушку
+     media.classList.add('no-image'); // the class shows a placeholder
      image.remove();
    }, { capture: true });
    ```
 
-5. **Замените `javascript:` и выполнение строк.** Для действий используйте
-   `<button type="button">`, для навигации — обычный `href`. Проверьте URL,
-   присваиваемые из данных, и разрешайте только нужные схемы и источники.
-   Вместо `eval` для JSON используйте `JSON.parse`, вместо строкового таймера —
-   `setTimeout(refresh, 1000)`. Если `new Function` вызывает зависимость,
-   выберите сборку без компиляции строк или замените зависимость.
+5. **Replace `javascript:` URLs and string execution.** Use `<button type="button">` for actions
+   and a normal `href` for navigation. Check URLs assigned from data and allow only the schemes
+   and origins you need. Use `JSON.parse` instead of `eval` for JSON, and `setTimeout(refresh, 1000)`
+   instead of a string timer. If a dependency calls `new Function`, pick a build without string
+   compilation or replace the dependency.
 
-6. **Закрепите CDN и добавьте SRI.** Для каждого стороннего JS/CSS с
-   фиксированным содержимым выполните шаги из раздела ниже и снова запустите
-   сканер. Сверьте также динамические загрузчики с `script-src`.
+6. **Pin CDN files and add SRI.** For every third-party JS/CSS with fixed content, follow the
+   section below and run the scanner again. Also reconcile dynamic loaders with `script-src`.
 
-7. **Включите наблюдение.** В preview отдавайте целевую политику в заголовке
-   `Content-Security-Policy-Report-Only`. Если уже есть блокирующая политика,
-   оставьте её отдельным заголовком. Пройдите все страницы и сценарии.
-   Для сбора отчётов настраивайте `Reporting-Endpoints` и `report-to` только
-   при наличии приёмника. Проверьте, какие URL и фрагменты данных попадают в
-   отчёты, прежде чем включать сбор на страницах с токенами.
+7. **Turn on observation.** On a preview deploy, send the target policy as
+   `Content-Security-Policy-Report-Only`. If a blocking policy already exists, keep it as a
+   separate header. Walk through every page and flow. Configure `Reporting-Endpoints` and
+   `report-to` only if you have a collector. Check which URLs and data fragments end up in
+   reports before enabling collection on pages with tokens.
 
-8. **Включите блокировку.** Проверьте целевую CSP в режиме
-   `Content-Security-Policy` на preview. Выкатывайте заголовки вместе с HTML,
-   внешними JS и актуальными SRI-хэшами. После переключения проверьте
-   боевые заголовки и сценарии. При регрессии возвращайте весь согласованный
-   деплой, включая политику.
+8. **Turn on enforcement.** Test the target CSP as `Content-Security-Policy` on preview. Ship the
+   headers together with the HTML, the external JS and current SRI hashes. After the switch,
+   check the production headers and flows. On a regression, roll back the whole coordinated
+   deploy, policy included.
 
-## CDN и SRI
+## CDN and SRI
 
-Фиксируйте полную версию в URL файла и ограничивайте источник каталогом версии
-в CSP, например `https://cdn.jsdelivr.net/npm/pkg@1.2.3/`. Завершающий `/`
-задаёт префикс пути. Разрешение по пути сужает область на CDN, а SRI проверяет
-байты конкретного файла. При HTTP-редиректе проверка пути CSP на следующем
-переходе ослабляется. Используйте конечный URL без редиректа.
+Pin the full version in the file URL and restrict the source to the version directory in CSP,
+e.g. `https://cdn.jsdelivr.net/npm/pkg@1.2.3/`. The trailing `/` makes it a path prefix. The path
+restriction narrows what's allowed on the CDN, and SRI verifies the bytes of the specific file.
+After an HTTP redirect, CSP path matching is relaxed for the next hop, so use the final URL
+with no redirect.
 
-Из корня скилла получите атрибуты для каждого точного URL:
+From the skill root, get the attributes for each exact URL:
 
 ```sh
 sh scripts/sri.sh \
@@ -203,63 +197,55 @@ sh scripts/sri.sh \
         crossorigin="anonymous"></script>
 ```
 
-Скрипт печатает SHA-384. Убедитесь, что скачивание прошло успешно. Ошибка
-`curl` в конвейере может оставить хэш пустого ввода. Для SRI на другом
-origin нужен CORS-ответ CDN с `Access-Control-Allow-Origin` и
-`crossorigin="anonymous"` в теге. Хэш проверяет сам ресурс, а его импорты,
-шрифты и изображения требуют отдельных правил загрузки. При обновлении
-меняйте URL, путь в CSP и SRI одновременно на всех страницах.
-[Спецификация SRI](https://w3c.github.io/webappsec-subresource-integrity/)
+The script prints SHA-384. Make sure the download succeeded: a `curl` failure inside the pipe
+can leave you with the hash of empty input. Cross-origin SRI needs the CDN to send
+`Access-Control-Allow-Origin` and the tag to have `crossorigin="anonymous"`. The hash covers the
+resource itself; its imports, fonts and images need their own load rules. When upgrading,
+change the URL, the CSP path and the SRI hash together on every page.
+[SRI specification](https://w3c.github.io/webappsec-subresource-integrity/)
 
-Turnstile загружайте с официального URL. Его SDK обновляется у провайдера,
-поэтому фиксированный хэш сломает загрузку при обновлении. CSS Google Fonts
-может различаться по User-Agent. Если нужны фиксированные байты, разместите
-CSS и файлы шрифтов у себя.
-[Загрузка SDK Turnstile](https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/)
+Load Turnstile from its official URL. The provider updates the SDK, so a pinned hash would break
+loading after an update. Google Fonts CSS may differ by User-Agent; if you need fixed bytes,
+self-host the CSS and font files.
+[Loading the Turnstile SDK](https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/)
 
-## Остальные заголовки
+## Other headers
 
-- **HSTS** заставляет браузер обращаться к домену по HTTPS после первого
-  получения заголовка по HTTPS. Добавляйте `includeSubDomains` после проверки
-  HTTPS на поддоменах. `preload` требует отдельного решения и подачи домена
-  в список браузеров.
-- **X-Frame-Options: DENY** дублирует запрет встраивания для старых браузеров.
-  Держите согласованным с `frame-ancestors`.
-- **X-Content-Type-Options: nosniff** требует корректных MIME для JS и CSS.
-  Проверьте, что запрос скрипта не получает HTML из запасного маршрута.
-- **Referrer-Policy: strict-origin-when-cross-origin** оставляет только origin
-  при HTTPS-переходах на другой origin. На страницах с токенами используйте
-  `no-referrer` и `Cache-Control: no-store`, включая алиасы и чистые URL.
-  Если поток допускает `/track.html#t=…`, фрагмент не отправляется в HTTP-запросе.
-  Клиентский JS всё равно видит значение. Держите токены вне аналитики и отчётов.
-- **Permissions-Policy** отключает ненужные API. `geolocation=(self)` подходит
-  странице с геопозицией, `geolocation=()` — странице без неё.
+- **HSTS** makes the browser use HTTPS for the domain after it first receives the header over
+  HTTPS. Add `includeSubDomains` once HTTPS works on subdomains. `preload` is a separate decision
+  and requires submitting the domain to the browsers' list.
+- **X-Frame-Options: DENY** duplicates the framing ban for old browsers. Keep it consistent with
+  `frame-ancestors`.
+- **X-Content-Type-Options: nosniff** requires correct MIME types for JS and CSS. Make sure a
+  script request doesn't get HTML from a fallback route.
+- **Referrer-Policy: strict-origin-when-cross-origin** sends only the origin on cross-origin HTTPS
+  navigations. On pages with tokens use `no-referrer` and `Cache-Control: no-store`, including
+  aliases and clean URLs. If the flow allows `/track.html#t=…`, the fragment isn't sent in the
+  HTTP request, but client JS still sees it. Keep tokens out of analytics and reports.
+- **Permissions-Policy** disables APIs you don't need. `geolocation=(self)` suits a page that
+  uses geolocation; `geolocation=()` a page that doesn't.
 
-## Грабли
+## Pitfalls
 
-- Обработчики `onclick` жили в шаблонах карточек, которые появляются после
-  загрузки данных. Поиск только по статической разметке их пропускает. Откройте панель, дождитесь данных, обновите список и нажмите на
-  вложенный элемент кнопки. Привязывайте делегирование к контейнеру,
-  который переживает перерисовку.
-- Резервная картинка задавалась через `onerror` в строке шаблона. Под
-  строгой CSP такой обработчик не покажет заглушку. Обычное всплытие здесь не помогает,
-  поскольку `error` на изображении не всплывает.
-- Зависимость появлялась через `document.createElement('script')`. Проверка
-  одних HTML-тегов пропускала загрузчик. Ищите присваивания `src`,
-  `import()` и ветки ленивой загрузки.
-- Ссылка трекинга содержала токен в query. Переход на фрагмент убрал его
-  из HTTP-запросов страницы. Сохраняйте отдельные `no-store` и `no-referrer`
-  и проверяйте каждый публичный URL страницы.
+- `onclick` handlers lived in card templates that only appear after data loads. Searching static
+  markup misses them. Open the panel, wait for data, refresh the list and click a nested element
+  of a button. Attach delegation to a container that survives re-rendering.
+- A fallback image was set via `onerror` in a template string. Under a strict CSP that handler
+  never shows the placeholder. Ordinary bubbling doesn't help, because `error` on an image does
+  not bubble.
+- A dependency was added via `document.createElement('script')`. Checking only HTML tags missed
+  the loader. Search for `src` assignments, `import()` and lazy-loading branches.
+- A tracking link carried the token in the query string. Moving it to the fragment removed it
+  from the page's HTTP requests. Keep `no-store` and `no-referrer` anyway and check every public
+  URL of the page.
 
-## Как проверить
+## How to verify
 
-1. **Локально.** Запустите `node tests/serve.mjs 8780`, если проект уже
-   содержит такой сервер. Для своего сервера используйте тот же принцип.
-   Прочитайте `vercel.json`, примените подходящие правила к URL запроса
-   и отдайте файл с правильным `Content-Type`. Для локального HTTP
-   уберите HSTS и `upgrade-insecure-requests` из локального ответа.
-   Применяйте правила к URL до подстановки `index.html` и проверяйте
-   переопределения на конкретном маршруте. Для правил из примера:
+1. **Locally.** Run `node tests/serve.mjs 8780` if the project already has such a server. For
+   your own server follow the same idea: read `vercel.json`, apply the matching rules to the
+   request URL and serve the file with the right `Content-Type`. For local HTTP, drop HSTS and
+   `upgrade-insecure-requests` from the local response. Apply rules to the URL before
+   `index.html` substitution and check per-route overrides. For the rules in the example:
 
    ```js
    import { readFileSync } from 'node:fs';
@@ -280,7 +266,7 @@ CSS и файлы шрифтов у себя.
      }
      return headers;
    }
-   // Передайте результат headersFor(url.pathname) в res.writeHead вместе с MIME.
+   // Pass headersFor(url.pathname) to res.writeHead along with the MIME type.
    ```
 
    ```sh
@@ -289,30 +275,26 @@ CSS и файлы шрифтов у себя.
    curl -fsS -D - -o /dev/null http://127.0.0.1:8780/admin.js
    ```
 
-2. **В браузере под блокирующей CSP.** Откройте Console и Network, отключите
-   кэш и перезагрузите страницу. Проверьте вход и MFA, кнопки после
-   перерисовки, смену фильтра, ошибку загрузки фото, карту и её иконки,
-   шрифты, Turnstile, запрос к RPC или Edge Function и WSS Realtime.
-   Для тестов с Playwright подключите слушатель `securitypolicyviolation`
-   через `page.addInitScript` до навигации. Сохраняйте `effectiveDirective`
-   и `blockedURI`. На локальной копии временно добавьте тестовый inline
-   `<script>` и кнопку с `onclick`, которые меняют текст страницы.
-   Под блокирующей политикой текст не должен меняться. Аналогично временно
-   подставьте неверный SRI-хэш и проверьте ошибку целостности в Console.
+2. **In a browser under the enforcing CSP.** Open Console and Network, disable the cache and
+   reload. Check sign-in and MFA, buttons after re-rendering, filter changes, a failing photo, the
+   map and its icons, fonts, Turnstile, a request to an RPC or Edge Function, and Realtime over
+   WSS. In Playwright tests, attach a `securitypolicyviolation` listener via `page.addInitScript`
+   before navigation and record `effectiveDirective` and `blockedURI`. On a local copy, briefly
+   add a test inline `<script>` and an `onclick` button that change the page text; under the
+   enforcing policy the text must not change. Likewise, plug in a wrong SRI hash and confirm the
+   integrity error in the Console.
 
-3. **На Vercel.** Проверьте реальный HTTPS-ответ, конечный URL после
-   редиректов, алиасы и страницы с токеном без настоящего токена в URL.
-   Локальный сервер воспроизводит простые правила, а маршрутизацию и
-   заголовки CDN проверяйте по фактическому ответу.
+3. **On Vercel.** Check the real HTTPS response, the final URL after redirects, aliases, and token
+   pages without a real token in the URL. The local server reproduces simple rules; check routing
+   and CDN headers against the actual response.
 
    ```sh
    curl -fsS -D - -o /dev/null https://my-site.vercel.app/
    curl -fsS -D - -o /dev/null https://my-site.vercel.app/track.html
    ```
 
-4. **Внешняя проверка.** При разрешении на внешний запрос проверьте публичный
-   URL без токена через [Security Headers](https://securityheaders.com/).
-   В [CSP Evaluator](https://csp-evaluator.withgoogle.com/) проверяйте строку
-   политики. Он может отметить разрешённые CDN или `'self'`, поскольку
-   доверенные источники тоже могут отдавать исполняемый контент. Устраняйте
-   лишние разрешения и подтверждайте работу сценариев в браузере.
+4. **External check.** If external requests are allowed, check the public URL (without a token)
+   with [Security Headers](https://securityheaders.com/). Paste the policy string into
+   [CSP Evaluator](https://csp-evaluator.withgoogle.com/). It may flag allowed CDNs or `'self'`,
+   since trusted sources can also serve executable content. Remove unnecessary allowances and
+   confirm the flows in a browser.

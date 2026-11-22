@@ -1,45 +1,44 @@
-# Проверка SQL-миграций перед передачей владельцу
+# Verifying SQL migrations before handing them to the owner
 
-Владелец применяет SQL вручную в Supabase SQL Editor. Ошибка в порядке файлов, сигнатуре RPC
-или грантах может остановить запись с сайта или оставить данные доступными лишней роли.
-Прогоните всю цепочку на чистой временной базе и отдельно проверьте, что новый файл
-безопасно применить повторно после сбоя или повторного запуска из SQL Editor.
+The owner applies SQL by hand in the Supabase SQL Editor. A mistake in file order, an RPC
+signature or grants can stop writes from the site or leave data readable by the wrong role.
+Run the whole chain on a fresh temporary database, and separately check that the new file is
+safe to apply again after a failure or a repeated run from the SQL Editor.
 
-## Что проверяет стенд
+## What the harness covers
 
-`scripts/pg-harness/harness.mjs` запускает встроенный Postgres 17. Каждый запуск поднимает
-новую базу, применяет SQL от `postgres`, печатает аудит и запускает сценарий, если он задан.
+`scripts/pg-harness/harness.mjs` starts an embedded Postgres 17. Each run creates a new database,
+applies SQL as `postgres`, prints an audit and runs a scenario if one is given.
 
-- Роли `anon`, `authenticated`, `service_role` без логина. У `service_role` есть
-  `BYPASSRLS`, но ей по-прежнему нужны гранты.
-- `auth.uid()`, `auth.role()`, `auth.jwt()` и `auth.email()` читают настройки сессии
-  `request.jwt.claims`, `request.jwt.claim.sub` и `request.jwt.claim.role`. Таблицы
-  `auth.users` и `auth.mfa_factors` содержат минимальный набор полей для фикстур и FK.
-- Default privileges по модели Supabase для объектов, создаваемых `postgres` в `public`.
-  Три роли получают права на новые таблицы и последовательности и `EXECUTE` на функции.
-  Фактические ACL проекта могут отличаться, особенно если менялись владелец или default privileges.
-- Есть пустая публикация `supabase_realtime`. Стенд пытается установить `pgcrypto`,
-  `uuid-ossp`, `citext` и `pg_trgm` в схему `extensions`; недоступные в сборке
-  расширения пропускаются. Схема `extensions` входит в начальный `search_path`.
+- Roles `anon`, `authenticated`, `service_role` without login. `service_role` has `BYPASSRLS` but
+  still needs grants.
+- `auth.uid()`, `auth.role()`, `auth.jwt()` and `auth.email()` read the session settings
+  `request.jwt.claims`, `request.jwt.claim.sub` and `request.jwt.claim.role`. The `auth.users` and
+  `auth.mfa_factors` tables have a minimal set of columns for fixtures and FKs.
+- Default privileges follow Supabase's model for objects created by `postgres` in `public`: the
+  three roles get rights on new tables and sequences and `EXECUTE` on functions. A real project's
+  ACLs may differ, especially if the owner or default privileges were changed.
+- There is an empty `supabase_realtime` publication. The harness tries to install `pgcrypto`,
+  `uuid-ossp`, `citext` and `pg_trgm` into the `extensions` schema; extensions missing from the
+  build are skipped. The `extensions` schema is in the initial `search_path`.
 
-Модель заканчивается на SQL. Подстановка claims не проверяет подпись JWT, выдачу токена или
-TOTP. HTTP-маршрутизация PostgREST, выбор перегрузки RPC, кэш схемы, Storage, доставка
-Realtime-событий и вызовы Edge Functions проверяются отдельно в тестовом Supabase-проекте.
-Локальный успешный прогон также оставляет открытым вопрос совместимости с уже накопленными
-данными и фактическими правами роли владельца в SQL Editor.
+The model stops at SQL. Substituting claims does not test JWT signatures, token issuance or
+TOTP. PostgREST HTTP routing, RPC overload resolution, the schema cache, Storage, Realtime event
+delivery and Edge Function calls must be tested separately on a staging Supabase project. A
+successful local run also leaves open compatibility with data already accumulated in production
+and the actual permissions of the owner's role in the SQL Editor.
 
-### Если миграция зависит от pg_net, pg_cron или Vault
+### If a migration depends on pg_net, pg_cron or Vault
 
-Подготовьте во временной копии миграций первый файл `bootstrap-local.sql`. Создайте
-только схемы, колонки и сигнатуры, которые использует SQL, включая имена аргументов
-для вызовов с `:=`. Если в цепочке есть `CREATE EXTENSION` для отсутствующего
-расширения, подмените эту строку заглушкой только в тестовой копии и зафиксируйте
-отличие в отчёте. Заглушка не регистрирует расширение в `pg_extension`.
-Пример для вызовов с `net.http_post`, `cron.schedule` и чтением Vault.
-[Пример вызовов в Supabase Docs](https://supabase.com/docs/guides/functions/schedule-functions)
+In a temporary copy of the migrations, prepare a first file `bootstrap-local.sql`. Create only the
+schemas, columns and signatures the SQL uses, including argument names for calls with `:=`. If the
+chain has a `CREATE EXTENSION` for a missing extension, replace that line with a stub in the test
+copy only and note the difference in your report. A stub does not register the extension in
+`pg_extension`. Example for calls to `net.http_post`, `cron.schedule` and reads from Vault.
+[Example calls in Supabase Docs](https://supabase.com/docs/guides/functions/schedule-functions)
 
 ```sql
--- bootstrap-local.sql, только для временного стенда
+-- bootstrap-local.sql, temporary harness only
 create schema net;
 create schema cron;
 create schema vault;
@@ -59,15 +58,15 @@ create view vault.decrypted_secrets as
 select 'api_key'::text as name, 'local-test-only'::text as decrypted_secret;
 ```
 
-Добавьте `bootstrap-local.sql` первым в `--migrations`. Для тестов вызова из прикладной
-роли воспроизведите нужные гранты адресно. Фиктивный ID подтверждает связность SQL.
-Чтобы проверить параметры вызова, пишите их в локальную таблицу и сверяйте из сценария.
-Отправку HTTP, выполнение задания по расписанию и управление секретами проверьте отдельно.
+Put `bootstrap-local.sql` first in `--migrations`. For tests that call these from an application
+role, reproduce the needed grants explicitly. A dummy ID proves the SQL wires together. To check
+call parameters, write them into a local table and compare from the scenario. Actual HTTP sending,
+scheduled job execution and secret management must be tested separately.
 
-## Как проверить
+## How to run it
 
-1. Из корня скилла скопируйте стенд во временный каталог. Для установки нужны Node.js и npm.
-   `node_modules` останется во временной копии.
+1. From the skill root, copy the harness into a temporary directory. Installation needs Node.js
+   and npm; `node_modules` stays in the temporary copy.
 
    ```sh
    work=$(mktemp -d)
@@ -76,8 +75,8 @@ select 'api_key'::text as name, 'local-test-only'::text as decrypted_secret;
    sh setup.sh
    ```
 
-2. Примените предыдущие миграции в порядке выкатки, затем новый файл. Во второй
-   команде замените имена файлов и положите `checks.mjs` во временную копию стенда.
+2. Apply the previous migrations in rollout order, then the new file. In the second command,
+   substitute your file names and put `checks.mjs` into the temporary harness copy.
 
    ```sh
    repo=/path/to/my-site
@@ -87,77 +86,73 @@ select 'api_key'::text as name, 'local-test-only'::text as decrypted_secret;
      --twice supabase_bugfixes.sql --scenario ./checks.mjs --json ./report.json
    ```
 
-   Сверьте строки `✓ применён` с инструкцией владельцу. При выкатке в несколько этапов
-   прогоните также промежуточные состояния с соответствующим списком файлов.
-   Если миграция меняет формат данных, проверьте её и на строках старого формата.
-   Подготовительный SQL с фикстурами можно вставить в локальный список непосредственно
-   перед новым файлом. Сценарий запускается уже после миграций.
+   Compare the `✓ applied` lines with the instructions for the owner. For a multi-stage rollout,
+   also run the intermediate states with the matching file lists. If the migration changes the
+   data format, test it against rows in the old format too. Setup SQL with fixtures can be placed
+   in the local list right before the new file. The scenario runs after the migrations.
 
-3. Разберите аудит и результат сценария. Код выхода `0` означает, что миграции и
-   заданный сценарий прошли. Предупреждения аудита не меняют код выхода. При ошибке
-   миграции стенд останавливается с кодом `1` и печатает файл и, если сервер сообщил
-   позицию, строку. Сокращённый вывод прогона с повтором и сценарием
+3. Review the audit and the scenario result. Exit code `0` means the migrations and the given
+   scenario passed. Audit warnings don't change the exit code. If a migration fails, the harness
+   stops with code `1` and prints the file and, if the server reported a position, the line.
+   Abridged output of a run with a re-apply and a scenario:
 
    ```text
-   ✓ применён supabase_bugfixes.sql
-   ✓ применён supabase_staff_mfa.sql
-   ✓ повторно применён supabase_bugfixes.sql
-   ✓ Таблицы public без RLS: нет
-   ⚠ Политики «true» для public/anon/authenticated: 1
+   ✓ applied supabase_bugfixes.sql
+   ✓ applied supabase_staff_mfa.sql
+   ✓ re-applied supabase_bugfixes.sql
+   ✓ Tables in public without RLS: none
+   ⚠ "true" policies for public/anon/authenticated: 1
       - menu_items.menu_public_read [SELECT {anon,authenticated}] using=true check=-
-   ✓ SECURITY DEFINER без set search_path: нет
-   ⚠ Функции, доступные через /rest/v1/rpc (проверить каждую): 25
-   ── Сценарий ./checks.mjs
-   ✓ anon без EXECUTE на place_order
-   ✓ повтор с тем же ключом оставил один заказ
-   ✓ is_staff требует членство и aal2
-   СЦЕНАРИЙ ПРОЙДЕН
+   ✓ SECURITY DEFINER without set search_path: none
+   ⚠ Functions callable via /rest/v1/rpc (review each one): 25
+   ── Scenario ./checks.mjs
+   ✓ anon has no EXECUTE on place_order
+   ✓ a retry with the same key left one order
+   ✓ is_staff requires membership and aal2
+   SCENARIO PASSED
    ```
 
-### Флаги
+### Flags
 
-| Флаг | Действие |
+| Flag | Effect |
 | --- | --- |
-| `--repo DIR` | Корень проекта. По умолчанию текущий каталог. |
-| `--migrations a.sql,b.sql` | Явный порядок. Пути относительно `--repo`. Без флага берётся первый подходящий документ из `DEPLOY.md`, `README.md`, `MIGRATIONS.md`, `docs/*.md`. Парсер ищет строки вида `1. a.sql` или `2) b.sql`, включая имена в бэктиках. Условия из текста он не исполняет. |
-| `--twice x.sql,y.sql` | Выполняет перечисленные файлы ещё раз после основной цепочки. Для настоящего повтора включите их и в основную цепочку. |
-| `--scenario ./checks.mjs` | Загружает модуль из пути относительно текущего каталога. Вызовет экспорт `default` либо `run`. |
-| `--no-audit` | Пропускает аудит. Удобно для отладки сценария. |
-| `--json ./report.json` | Записывает результаты миграций, аудита и сценария. Файл создаётся после подключения к базе и выполнения проверок; сбой запуска может оставить без отчёта. |
-| `--port 54330` | Порт локального Postgres. По умолчанию `54329`. |
+| `--repo DIR` | Project root. Defaults to the current directory. |
+| `--migrations a.sql,b.sql` | Explicit order. Paths are relative to `--repo`. Without the flag the order comes from the first matching document among `DEPLOY.md`, `README.md`, `MIGRATIONS.md`, `docs/*.md`. The parser looks for lines like `1. a.sql` or `2) b.sql`, including names in backticks. It does not act on conditions written in the text. |
+| `--twice x.sql,y.sql` | Runs the listed files again after the main chain. For a real re-apply, include them in the main chain too. |
+| `--scenario ./checks.mjs` | Loads a module from a path relative to the current directory and calls its `default` or `run` export. |
+| `--no-audit` | Skips the audit. Handy while debugging a scenario. |
+| `--json ./report.json` | Writes the results of migrations, audit and scenario. The file is created after connecting to the database and running the checks; a startup failure may leave no report. |
+| `--port 54330` | Local Postgres port. Defaults to `54329`. |
 
-### Как читать аудит
+### Reading the audit
 
-| Строка отчёта | Что проверить |
+| Report line | What to check |
 | --- | --- |
-| Таблицы `public` без RLS | Клиентские гранты на закрытые данные требуют исправления. Для внутренней таблицы с отозванными правами подтвердите отказ и для `anon`, и для `authenticated`. |
-| Политики `true` | Открытый `SELECT` на публичном справочнике допустим. Безусловная запись требует обоснования и проверки вместе с эффективными грантами. Поиск ловит буквальное `true`, поэтому сложные условия проверяйте сценариями. |
-| `SECURITY DEFINER` без `search_path` | Зафиксируйте путь, например `set search_path = public, pg_temp`, если вызывающие роли не могут создавать объекты в `public`. Аудит видит наличие параметра, содержимое проверяйте вручную. |
-| Доступные RPC | Сверьте `EXECUTE` каждой сигнатуры с контрактом. Метка «через PUBLIC» требует проверки ACL. «Без проверки личности» определяется поиском по телу функции. Публичный RPC по токену может быть штатным, если проверяет токен и возвращает только нужные данные. |
-| Читаемые view без `security_invoker` | Обычное view использует права владельца для доступа к базовым таблицам. Для обычного view проверьте `security_invoker = true` или отзовите клиентский `SELECT`. Для materialized view проверяйте доступ к сохранённым строкам и гранты. |
-| Прямая запись `anon` | Это кандидаты по сочетанию ACL и политик. Проверьте нужную операцию и ожидаемое состояние строки после неё. Запись через RPC сама по себе не закрывает прямую запись. |
-| `supabase_realtime` | Список таблиц в публикации. Сверьте его с намерением и проверьте SELECT-политики. |
+| Tables in `public` without RLS | Client grants on private data must be fixed. For an internal table with revoked rights, confirm the rejection for both `anon` and `authenticated`. |
+| `true` policies | An open `SELECT` on a public catalog is fine. An unconditional write needs a justification and a check together with the effective grants. The search matches a literal `true`, so test complex conditions with scenarios. |
+| `SECURITY DEFINER` without `search_path` | Pin the path, e.g. `set search_path = public, pg_temp`, provided calling roles can't create objects in `public`. The audit only sees whether the setting exists; check its contents by hand. |
+| Callable RPCs | Compare each signature's `EXECUTE` with the contract. The "via PUBLIC" label calls for an ACL check. "No identity check" is detected by searching the function body. A public token-based RPC can be legitimate if it verifies the token and returns only the necessary data. |
+| Readable views without `security_invoker` | A plain view uses the owner's rights to read base tables. Set `security_invoker = true` or revoke client `SELECT`. For a materialized view, check access to the stored rows and its grants. |
+| Direct `anon` writes | Candidates based on the combination of ACLs and policies. Test the specific operation and the expected row state afterwards. Writing through an RPC does not by itself close direct writes. |
+| `supabase_realtime` | Tables in the publication. Compare with intent and check the SELECT policies. |
 
-Детали по правам и RLS см. в `references/supabase-audit.md`.
+See `references/supabase-audit.md` for details on permissions and RLS.
 
-## Как писать сценарии
+## Writing scenarios
 
-Возьмите за основу `scripts/pg-harness/example-scenario.mjs`. Запросы запускайте
-последовательно через `await`: одна сессия переключает роль и claims. Через `h.q`
-готовьте фикстуры и проверяйте фактическое состояние базы от `postgres`, а доступ
-проверяйте через `h.asAnon`, `h.asUser` или `h.asService`.
+Start from `scripts/pg-harness/example-scenario.mjs`. Run queries sequentially with `await`: a
+single session switches role and claims. Use `h.q` to prepare fixtures and inspect the actual
+database state as `postgres`, and test access with `h.asAnon`, `h.asUser` or `h.asService`.
 
-**RLS и гранты.** Для таблицы с правом `SELECT` и политикой владельца сначала
-подтвердите, что владелец видит конкретную строку, затем проверьте, что другой
-пользователь получает `rowCount === 0` на том же запросе. Пустая таблица даёт ложный
-успех отрицательной проверки. Если грант должен быть отозван, ожидайте SQLSTATE
-`42501` через `h.rejects`. Для бизнес-отказа проверяйте конкретную ошибку, например
-`/not staff/`, или явный результат `false` / пустой набор по контракту функции.
+**RLS and grants.** For a table with `SELECT` granted and an owner policy, first confirm that the
+owner sees a specific row, then check that another user gets `rowCount === 0` on the same query.
+An empty table makes a negative check pass falsely. If a grant should be revoked, expect SQLSTATE
+`42501` via `h.rejects`. For a business rejection, check the specific error, e.g. `/not staff/`, or
+an explicit `false` / empty set according to the function's contract.
 
-**2FA.** Создайте пользователя через `h.createUser` до вставки связанной строки.
-Один и тот же сотрудник должен получить отказ с `aal1` и доступ с `aal2`. Проверьте
-также постороннего пользователя с `aal2`. Ниже пример для схемы со `staff(id, name, role)`
-и `is_staff(uuid)`.
+**2FA.** Create the user with `h.createUser` before inserting related rows. The same staff member
+must be rejected at `aal1` and allowed at `aal2`. Also test an outsider at `aal2`. Example for a
+schema with `staff(id, name, role)` and `is_staff(uuid)`:
 
 ```js
 export default async function (h) {
@@ -165,7 +160,7 @@ export default async function (h) {
   const other = await h.createUser();
   await h.q(
     'insert into public.staff (id, name, role) values ($1, $2, $3)',
-    [uid, 'Тест', 'admin'],
+    [uid, 'Test', 'admin'],
   );
 
   const sql = 'select public.is_staff($1::uuid) as ok';
@@ -173,14 +168,13 @@ export default async function (h) {
   h.assert.equal((await h.asUser(uid, sql, [uid])).rows[0].ok, false);
   h.assert.equal((await h.asUser(uid, sql, [uid], { aal: 'aal2' })).rows[0].ok, true);
   h.assert.equal((await h.asUser(other, sql, [other], { aal: 'aal2' })).rows[0].ok, false);
-  h.log('is_staff требует членство и aal2');
+  h.log('is_staff requires membership and aal2');
 }
 ```
 
-**Идемпотентность RPC.** Отдельно от `--twice` вызовите RPC дважды с тем же ключом
-и валидным payload. В примере `payload` содержит данные тестового заказа и
-`clientKey` — UUID. Если запись идёт через Edge-шлюз, используйте `h.asService`
-для SQL-вызова, а отказ для `anon` проверьте отдельно.
+**RPC idempotency.** Apart from `--twice`, call the RPC twice with the same key and a valid
+payload. In the example, `payload` holds test order data and `clientKey` is a UUID. If writes go
+through an Edge gate, use `h.asService` for the SQL call and test the `anon` rejection separately.
 
 ```js
 const sql = 'select * from public.place_order($1::jsonb)';
@@ -197,10 +191,10 @@ const { rows: [count] } = await h.q(
 h.assert.equal(count.n, 1);
 ```
 
-**Окна частоты.** Чтобы предыдущие фикстуры не исчерпали лимит в следующем
-тесте, состарьте их от `postgres`. Ограничьте UPDATE идентификаторами созданных
-строк. В отдельной проверке лимита сохраните свежий `created_at`, проверьте отказ,
-затем состарьте строки и проверьте, что новый запрос проходит.
+**Rate-limit windows.** So that earlier fixtures don't exhaust the limit for the next test, age
+them as `postgres`, restricting the UPDATE to the ids of the rows you created. In a dedicated
+limit test, keep a fresh `created_at`, check the rejection, then age the rows and check that a new
+request passes.
 
 ```js
 await h.q(
@@ -209,11 +203,10 @@ await h.q(
 );
 ```
 
-**Часовые пояса.** Сравните часы и минуты в зоне бизнес-правила, затем проверьте
-интервал между двумя абсолютными моментами. Выберите время позже стандартного
-ETA, чтобы проверить именно запланированную доставку. Добавьте случай с переходом
-через местную полночь. Здесь `tz` — IANA-зона из проекта, `expectedHm` — переданное
-RPC местное время, `order` — результат вызова.
+**Time zones.** Compare hours and minutes in the business rule's zone, then check the interval
+between two absolute moments. Pick a time later than the default ETA so you test the scheduled
+delivery specifically. Add a case that crosses local midnight. Here `tz` is the project's IANA
+zone, `expectedHm` is the local time passed to the RPC, and `order` is the call's result.
 
 ```js
 const { rows: [eta] } = await h.q(
@@ -225,35 +218,33 @@ h.assert.equal(eta.hm, expectedHm);
 h.assert.equal(Number(eta.minutes), 20);
 ```
 
-## Грабли
+## Pitfalls
 
-- **macOS и симлинки.** Если старт Postgres падает на загрузке библиотеки, повторите
-  `sh setup.sh`. Скрипт запускает `scripts/hydrate-symlinks.js` из установленного
-  пакета `@embedded-postgres` и скрывает его вывод. Для диагностики запустите этот
-  JS вручную из каталога пакета внутри `node_modules/@embedded-postgres/`.
-- **Порт занят.** Повторите запуск с `--port 54330` или другим свободным портом.
-- **FK персонала.** Случайный UUID в `staff.id` падает на FK, если пользователя
-  ещё нет в `auth.users`. Сначала `h.createUser()`, затем INSERT с его UUID.
-- **Новый тип результата RPC.** `CREATE OR REPLACE FUNCTION` с теми же входными
-  типами не меняет тип результата, в том числе форму `RETURNS TABLE`. Удалите
-  прежнюю сигнатуру и пересоздайте функцию. Проверьте зависимости и в той же
-  транзакции восстановите `REVOKE`/целевые `GRANT EXECUTE`. Новый объект получает
-  default privileges, поэтому повтор сам по себе не гарантирует прежний ACL.
-- **Изменились правила шлюза.** Старый сценарий вызывал `place_order` как `anon`.
-  После переключения на Edge-шлюз тест успешного оформления должен идти через
-  `service_role`, а вызов от `anon` должен получить `42501`. Повтор SQL не должен
-  вернуть публичный `EXECUTE`.
+- **macOS and symlinks.** If Postgres fails to start while loading a library, run `sh setup.sh`
+  again. It runs `scripts/hydrate-symlinks.js` from the installed `@embedded-postgres` package and
+  hides its output. To diagnose, run that JS by hand from the package directory inside
+  `node_modules/@embedded-postgres/`.
+- **Port in use.** Rerun with `--port 54330` or another free port.
+- **Staff FK.** A random UUID in `staff.id` fails the FK if the user doesn't exist in `auth.users`
+  yet. Call `h.createUser()` first, then INSERT with its UUID.
+- **New RPC result type.** `CREATE OR REPLACE FUNCTION` with the same input types does not change
+  the result type, including the shape of `RETURNS TABLE`. Drop the old signature and recreate the
+  function. Check dependencies and restore `REVOKE` / targeted `GRANT EXECUTE` in the same
+  transaction. The new object gets default privileges, so re-running alone doesn't guarantee the
+  previous ACL.
+- **Gate rules changed.** An old scenario called `place_order` as `anon`. After switching to the
+  Edge gate, the successful-order test must go through `service_role`, and an `anon` call must get
+  `42501`. Re-running the SQL must not restore public `EXECUTE`.
 
-## Перед передачей владельцу
+## Before handing it to the owner
 
-1. Прогоните всю цепочку в порядке из инструкции владельцу, включая новый файл.
-   Сверьте порядок с уже выкаченными изменениями и условиями включения шлюза или 2FA.
-2. Повторно примените новый файл через `--twice`. Для обновления существующей базы
-   проверьте также сохранение старых строк и заполнение новых полей.
-3. Проверьте своего, чужого и анонимного пользователя. Для служебных RPC добавьте
-   `service_role`, для персонала — сравнение `aal1` и `aal2`.
-4. После каждого `DROP FUNCTION` сверяйте эффективный `EXECUTE` по точной сигнатуре,
-   включая доступ через `PUBLIC`. Проверьте отказ и успешный вызов после повтора файла.
-5. Передайте владельцу порядок выполнения в SQL Editor, условия выкатки и короткие
-   проверки сайта после применения. Если использовались заглушки, укажите, какие
-   интеграции требуют проверки на тестовом проекте.
+1. Run the whole chain in the order given to the owner, including the new file. Reconcile the order
+   with what has already shipped and with the conditions for enabling the gate or 2FA.
+2. Re-apply the new file with `--twice`. When updating an existing database, also check that old
+   rows survive and new columns get filled.
+3. Test the owner, a stranger and an anonymous user. Add `service_role` for internal RPCs and an
+   `aal1` vs `aal2` comparison for staff.
+4. After every `DROP FUNCTION`, verify the effective `EXECUTE` for the exact signature, including
+   access via `PUBLIC`. Test both the rejection and a successful call after re-applying the file.
+5. Give the owner the SQL Editor execution order, rollout conditions and short site checks to run
+   afterwards. If stubs were used, list the integrations that need testing on a staging project.

@@ -2,6 +2,7 @@ const sb = supabase.createClient(APP_CONFIG.SUPABASE_URL, APP_CONFIG.SUPABASE_AN
 let MENU = [];
 let cart = {};
 let discount = 0;
+const money = (cents) => '$' + (cents / 100).toFixed(2);
 
 function toggleTheme() {
   const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -15,8 +16,8 @@ async function loadMenu() {
   document.getElementById('menu').innerHTML = MENU.map(m => `
     <div class="pizza">
       <h3>${m.name}</h3>
-      <p>${m.price} ₸</p>
-      <button onclick="addToCart('${m.id}')">В корзину</button>
+      <p>${money(m.price)}</p>
+      <button onclick="addToCart('${m.id}')">Add to cart</button>
     </div>`).join('');
 }
 
@@ -35,7 +36,7 @@ function renderCart() {
     const m = MENU.find(x => x.id === id);
     return `<li>${m.name} × ${q} <button onclick="removeItem('${id}')">✕</button></li>`;
   }).join('');
-  document.getElementById('total').textContent = total();
+  document.getElementById('total').textContent = money(total());
 }
 
 function removeItem(id) { delete cart[id]; renderCart(); }
@@ -43,7 +44,7 @@ function removeItem(id) { delete cart[id]; renderCart(); }
 async function applyPromo() {
   const code = document.getElementById('promo').value;
   const { data, error } = await sb.rpc('redeem_promo', { p_code: code });
-  if (error) { document.getElementById('msg').textContent = 'Код не подошёл'; return; }
+  if (error) { document.getElementById('msg').textContent = 'Invalid code'; return; }
   discount = data;
   renderCart();
 }
@@ -59,8 +60,8 @@ async function placeOrder(e) {
   };
   const { error } = await sb.from('orders').insert(order);
   document.getElementById('msg').innerHTML = error
-    ? 'Ошибка: ' + error.message
-    : `Спасибо, ${order.name}! Мы позвоним на ${order.phone}.`;
+    ? 'Error: ' + error.message
+    : `Thank you, ${order.name}! We will call you at ${order.phone}.`;
   if (!error) { cart = {}; renderCart(); }
 }
 

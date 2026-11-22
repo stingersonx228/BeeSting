@@ -1,111 +1,115 @@
 ---
 name: beesting
 license: MIT
-description: BeeSting — плейбук безопасности для сайтов «статический фронт (vanilla JS/HTML) + Supabase + Vercel/Netlify». Аудит RLS, грантов и SECURITY DEFINER RPC, исправления миграцией с локальной проверкой на Supabase-подобном Postgres (embedded, без доступа к проду), строгая CSP без unsafe-inline и SRI, антиспам Cloudflare Turnstile через Edge Function-шлюз, 2FA персонала (aal2). Используй всегда, когда в проекте есть supabase*.sql / supabase/migrations / supabase-js и пользователь просит проверить безопасность, «что у нас в плане защиты», найти дыры, починить RLS или права, написать или проверить SQL-миграцию, закрыть RPC от anon, добавить капчу или антиспам на заказы/формы, включить 2FA для админки, убрать inline-скрипты, настроить CSP/заголовки, даже если слово «безопасность» не прозвучало.
+description: BeeSting — security playbook for sites built as "static frontend (vanilla JS/HTML) + Supabase + Vercel/Netlify". Audits RLS, grants and SECURITY DEFINER RPCs; fixes them with a migration verified on a local Supabase-like Postgres (embedded, no access to production); strict CSP without unsafe-inline plus SRI; anti-spam with Cloudflare Turnstile behind an Edge Function gate; staff 2FA (aal2). Use it whenever the project has supabase*.sql / supabase/migrations / supabase-js and the user asks to check security, "how protected are we", find holes, fix RLS or permissions, write or review a SQL migration, lock an RPC away from anon, add a captcha or anti-spam to orders/forms, enable 2FA for the admin panel, remove inline scripts, or set up CSP/security headers — even if the word "security" never comes up.
 ---
 
-# BeeSting: безопасность сайта на Supabase
+# BeeSting: securing a Supabase-backed site
 
-Модель угроз, от которой зависят все решения: URL проекта и anon key публичны. Любой человек
-может из консоли вызвать всё, что разрешено ролям `anon` и `authenticated` (вторая достаётся
-бесплатной регистрацией), минуя сайт. Поэтому защита живёт в базе (RLS, гранты, проверки
-внутри функций), а проверки в JS нужны только для удобства пользователя. Сайт — только витрина.
+The threat model behind every decision: the project URL and the anon key are public. Anyone
+can call, straight from the browser console, whatever the `anon` and `authenticated` roles are
+allowed to do (the latter comes free with sign-up), bypassing the site entirely. So protection
+lives in the database — RLS, grants and checks inside functions — and JavaScript checks exist
+only for user convenience. The site is just a storefront.
 
-Второй факт, который определяет процесс: SQL обычно применяет владелец базы руками в SQL Editor.
-Ошибка в миграции ломает прод, а откат зависит от человека. Отсюда правило: каждая миграция
-до передачи проходит на локальном стенде вместе со всеми предыдущими.
+The second fact that shapes the process: SQL is usually applied by the database owner by hand
+in the SQL Editor. A broken migration breaks production, and rolling back depends on a person.
+Hence the rule: every migration runs on the local harness together with all previous ones
+before it is handed over.
 
-## Что где лежит
+## Where things are
 
-| Задача | Читать |
+| Task | Read |
 |---|---|
-| Аудит базы, шаблон миграции-исправления | `references/supabase-audit.md` |
-| Проверка SQL на локальном Postgres, сценарии | `references/sql-verification.md`, `scripts/pg-harness/` |
-| CSP без unsafe-inline, SRI, заголовки | `references/csp-sri.md`, `scripts/csp_scan.mjs`, `scripts/sri.sh` |
-| Антиспам на заказы и формы | `references/turnstile-gate.md`, `assets/turnstile-gate.ts` |
-| 2FA для админки и операторов | `references/staff-mfa.md`, `assets/staff-mfa.js` |
+| Database audit, fix-migration template | `references/supabase-audit.md` |
+| Verifying SQL on local Postgres, scenarios | `references/sql-verification.md`, `scripts/pg-harness/` |
+| CSP without unsafe-inline, SRI, headers | `references/csp-sri.md`, `scripts/csp_scan.mjs`, `scripts/sri.sh` |
+| Anti-spam for orders and forms | `references/turnstile-gate.md`, `assets/turnstile-gate.ts` |
+| 2FA for admins and operators | `references/staff-mfa.md`, `assets/staff-mfa.js` |
 
-Справочник читай, когда дошёл до его темы, а не все сразу.
+Read a reference when you reach its topic, not all of them up front.
 
-## Процесс
+## Process
 
-### 0. Карта проекта (5 минут, экономит часы)
-- Миграции и их **порядок применения**. Обычно это нумерованный список в DEPLOY.md/README,
-  иначе `supabase/migrations/` по имени. Без порядка стенд не поднять, спроси у пользователя.
-- Что вызывает клиент: `grep -n "\.rpc(\|\.from(\|functions/v1\|channel(" *.js`. Это реальная
-  поверхность атаки.
-- Кто применяет SQL и кто деплоит. Если у тебя нет доступа к проду, результат работы — файлы,
-  текст SQL и PR, а не изменения в проде.
+### 0. Map the project (5 minutes that save hours)
+- Migrations and their **apply order**. Usually a numbered list in DEPLOY.md/README, otherwise
+  `supabase/migrations/` sorted by name. Without the order the harness can't be built — ask the user.
+- What the client calls: `grep -n "\.rpc(\|\.from(\|functions/v1\|channel(" *.js`. This is the
+  real attack surface.
+- Who applies SQL and who deploys. If you have no production access, the deliverable is files,
+  SQL text and a PR — not changes in production.
 
-### 1. Аудит
-1. Подними стенд и сними автоматический отчёт:
+### 1. Audit
+1. Start the harness and take the automatic report:
    ```bash
    cp -r <skill>/scripts/pg-harness "$TMP/pgh" && sh "$TMP/pgh/setup.sh"
-   node "$TMP/pgh/harness.mjs" --repo <проект>
+   node "$TMP/pgh/harness.mjs" --repo <project>
    ```
-   Отчёт покажет: таблицы без RLS, политики `true`, definer без `search_path`, все функции,
-   доступные anon/authenticated (с пометками «через PUBLIC» и «без проверки личности»), view,
-   обходящие RLS, прямую запись anon, таблицы realtime.
-2. Разбери вручную каждую функцию из списка «доступные через rpc» по чек-листу
-   `references/supabase-audit.md`: кто может вызвать, что проверяет, что возвращает, можно ли
-   подделать цену, статус, чужой id, обойти лимит.
-3. Клиент: `service_role` в коде, прямые insert/update в таблицы, `.rpc()` без `await`
-   (supabase-js ленивый, такой запрос не уходит), `innerHTML` с данными пользователей,
-   персональные данные в URL.
-4. Фронт: `node <skill>/scripts/csp_scan.mjs <проект>` и заголовки в `vercel.json`.
+   The report lists tables without RLS, `true` policies, definer functions without
+   `search_path`, every function callable by anon/authenticated (flagged "via PUBLIC" and
+   "no identity check"), views that bypass RLS, direct anon writes and realtime tables.
+2. Review every function in the "callable via rpc" list by hand against the checklist in
+   `references/supabase-audit.md`: who can call it, what it checks, what it returns, whether a
+   caller can forge a price, a status, someone else's id, or bypass a limit.
+3. Client: `service_role` in the code, direct inserts/updates into tables, `.rpc()` without
+   `await` (supabase-js is lazy — such a request is never sent), `innerHTML` with user data,
+   personal data in URLs.
+4. Frontend: `node <skill>/scripts/csp_scan.mjs <project>` and the headers in `vercel.json`.
 
-Отчёт оформляй так, чтобы владелец понял без тебя:
+Write the report so the owner understands it without you:
 
 ```
-## [Критично|Высоко|Средне|Низко] Короткое название
-Где: файл:строка / функция
-Атака: что именно делает злоумышленник (конкретный запрос), что получает
-Исправление: что меняем; требует ли это изменений сайта и порядка выкатки
+## [Critical|High|Medium|Low] Short title
+Where: file:line / function
+Attack: what exactly the attacker does (a concrete request) and what they get
+Fix: what changes; whether it requires site changes and a rollout order
 ```
 
-Сначала идут находки, которые эксплуатируются анонимом прямо сейчас (утечка персональных данных,
-бесплатные заказы, чужие промокоды), затем то, что требует входа, затем гигиена.
+First come findings an anonymous visitor can exploit right now (personal data leaks, free
+orders, other people's promo codes), then those that require sign-in, then hygiene.
 
-### 2. Исправления
-- **Новый файл миграции**, применяется последним. Уже применённые файлы не редактируй:
-  владелец их выполнил, и правка ничего не изменит в базе.
-- Файл **идемпотентный** (`create or replace`, `if not exists`, `drop policy if exists`),
-  обёрнут в `begin/commit`, в шапке: после какого файла применять, что меняется для сайта, откат.
-- **Совместимость с живым сайтом.** Сайт и SQL выкатываются в разное время. Либо новый SQL
-  работает со старым клиентом (новые параметры с `default`, старые сигнатуры не ломаются),
-  либо явно напиши порядок: «сначала мерж PR, потом SQL» или наоборот. Лучше добиться,
-  чтобы любой порядок был безопасным.
-- Если файл переписывает функцию, которую меняли более поздние миграции, сверься с последней
-  версией функции. Иначе тихо потеряешь чужую проверку: в реальной истории так пропала
-  валидация филиала в `place_order`.
-- Опасные включения (lock RPC за шлюзом, обязательная 2FA) делай отдельным последним шагом,
-  который запускается после проверки на проде, и у каждого шага пиши откат.
+### 2. Fixes
+- **A new migration file**, applied last. Do not edit migrations that were already applied:
+  the owner has run them, and editing them changes nothing in the database.
+- The file is **idempotent** (`create or replace`, `if not exists`, `drop policy if exists`),
+  wrapped in `begin/commit`, with a header: which file it goes after, what changes for the site,
+  how to roll back.
+- **Compatibility with the live site.** The site and the SQL ship at different times. Either the
+  new SQL works with the old client (new parameters have defaults, old signatures keep working),
+  or state the order explicitly: "merge the PR first, then the SQL" or the other way round. Best
+  of all, make either order safe.
+- If the file rewrites a function that later migrations changed, start from the latest version
+  of that function. Otherwise you will silently drop someone else's check — in a real project a
+  branch validation in `place_order` was lost exactly this way.
+- Risky switches (locking an RPC behind a gate, mandatory 2FA) go into a separate final step
+  that runs after a production check, and every step gets a rollback.
 
-### 3. Проверка
-- Стенд: все миграции по порядку + новый файл + новый файл повторно (`--twice`) + сценарий
-  (`--scenario`), где на каждое исправление есть пара проверок «чужой/аноним не может» и
-  «свой может». Иначе исправление может сломать легитимный путь, и ты этого не увидишь.
-- `csp_scan.mjs` даёт 0 блокирующих находок. Затем страница с заголовками из `vercel.json`
-  открывается без CSP-ошибок в консоли.
-- Если в проекте есть e2e (Playwright и т.п.), прогони их.
-- Честно пиши, что проверено на стенде, а что только на проде (HTTP-слой PostgREST, Storage,
-  Realtime, Edge Functions стенд не эмулирует).
+### 3. Verification
+- Harness: all migrations in order + the new file + the new file again (`--twice`) + a scenario
+  (`--scenario`) with a pair of checks for every fix: "a stranger/anonymous user can't" and "the
+  rightful user can". Otherwise a fix may break the legitimate path and you won't notice.
+- `csp_scan.mjs` reports 0 blocking findings, and the page served with the `vercel.json`
+  headers opens without CSP errors in the console.
+- If the project has e2e tests (Playwright etc.), run them.
+- Be honest about what was verified on the harness and what only production can show (the
+  harness does not emulate PostgREST's HTTP layer, Storage, Realtime or Edge Functions).
 
-### 4. Передача
-- SQL для SQL Editor отдавай **одним блоком текстом** в ответе: владелец копирует его целиком.
-  После любой правки файла выдавай текст заново, старый уже неактуален.
-- Обнови список миграций в DEPLOY.md (порядок, какие файлы идемпотентны, условия запуска).
-- Деплой на Vercel Hobby: коммиты не от владельца проекта блокируются. Работай в ветке,
-  открой PR, владелец мержит кнопкой **Create a merge commit** (не squash/rebase, иначе автором
-  останется участник и деплой снова заблокируется).
-- Не применяй SQL к проду и не меняй настройки прода сам, пока пользователь явно не попросил,
-  даже если есть MCP с доступом.
+### 4. Handoff
+- Give SQL for the SQL Editor **as one block of text** in your answer: the owner copies it whole.
+  After any edit to the file, give the text again — the old one is stale.
+- Update the migration list in DEPLOY.md (order, which files are idempotent, preconditions).
+- Deploying on Vercel Hobby: commits not authored by the project owner are blocked. Work on a
+  branch and open a PR; the owner merges it with **Create a merge commit** (not squash/rebase,
+  otherwise the contributor stays the author and the deploy is blocked again).
+- Do not apply SQL to production or change production settings yourself unless the user
+  explicitly asks, even if an MCP server gives you access.
 
-## Принципы
-- Сначала закрывай то, что работает против анонима сейчас, и только потом наводи красоту.
-- Каждый шаг выкатки оставляет сайт рабочим и имеет откат.
-- Ошибки из базы короткие и машинные (`too many orders`), понятный текст пользователю показывает клиент.
-- Не раздувай права «на всякий случай»: `revoke ... from public, anon, authenticated`, затем
-  точечный `grant`.
-- Предлагай, но не навязывай бизнес-решения: срок хранения персональных данных, согласие на
-  обработку, локализацию данных. Это решает владелец.
+## Principles
+- Close what works against an anonymous visitor today first; polish later.
+- Every rollout step leaves the site working and has a rollback.
+- Database errors are short and machine-readable (`too many orders`); the client turns them
+  into human-friendly text.
+- Don't grant permissions "just in case": `revoke ... from public, anon, authenticated`, then a
+  targeted `grant`.
+- Suggest but don't impose business decisions: personal-data retention, processing consent,
+  data residency. Those are the owner's call.

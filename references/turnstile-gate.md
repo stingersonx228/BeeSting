@@ -1,31 +1,30 @@
-# Антиспам через Cloudflare Turnstile и Edge Function
+# Anti-spam with Cloudflare Turnstile and an Edge Function
 
-- [Шлюз](#шлюз)
-- [Ключи, CORS и CSP](#ключи-cors-и-csp)
-- [Клиент](#клиент)
-- [Выкатка](#выкатка) и [откат](#откат)
-- [Грабли](#грабли)
-- [Как проверить](#как-проверить)
+- [Gate](#gate)
+- [Keys, CORS and CSP](#keys-cors-and-csp)
+- [Client](#client)
+- [Rollout](#rollout) and [rollback](#rollback)
+- [Pitfalls](#pitfalls)
+- [How to verify](#how-to-verify)
 
 ```text
-Браузер → виджет Turnstile → одноразовый токен
-Браузер → POST /functions/v1/turnstile-gate { action, token, payload }
-Шлюз   → Cloudflare Siteverify → success, action, hostname
-Шлюз   → PostgREST под service_role → place_order(jsonb)
+Browser → Turnstile widget → single-use token
+Browser → POST /functions/v1/turnstile-gate { action, token, payload }
+Gate    → Cloudflare Siteverify → success, action, hostname
+Gate    → PostgREST as service_role → place_order(jsonb)
 ```
 
-URL Supabase и anon key публичны. Пока у браузерных ролей есть `EXECUTE`,
-клиентский виджет можно пропустить, вызвав RPC напрямую. Защита включается
-целиком после двух изменений: шлюз требует валидный токен, база отзывает прямой
-доступ. Проверьте все перегрузки и другие пути к той же записи по
-`references/supabase-audit.md`.
+The Supabase URL and anon key are public. As long as browser roles have `EXECUTE`, the client
+widget can be skipped by calling the RPC directly. Protection is only complete after two
+changes: the gate requires a valid token, and the database revokes direct access. Check every
+overload and any other path to the same write per `references/supabase-audit.md`.
 
-## Шлюз
+## Gate
 
-Возьмите `assets/turnstile-gate.ts` как `supabase/functions/turnstile-gate/index.ts`.
-В `ACTIONS` оставьте только публичные операции, которым нужна капча. Ключ
-`order` — значение `action` в виджете и JSON запроса. `rpc` — имя функции
-в базе, `args` преобразует тело запроса в именованные параметры PostgREST.
+Use `assets/turnstile-gate.ts` as `supabase/functions/turnstile-gate/index.ts`. Keep in
+`ACTIONS` only the public operations that need a captcha. The key `order` is the `action` value
+in the widget and in the request JSON. `rpc` is the database function name; `args` turns the
+request body into named PostgREST parameters.
 
 ```ts
 const ACTIONS: Record<string, Action> = {
@@ -39,64 +38,46 @@ const ACTIONS: Record<string, Action> = {
 };
 ```
 
-Имя RPC и набор аргументов определяет сервер. Сверяйте типы, размеры и обязательные
-поля. Проверки цены, доступности, лимитов и идемпотентности оставьте в RPC.
-`service_role` обходит RLS, поэтому публичный шлюз подходит для узких операций
-вроде создания заказа. Пользовательские операции, зависящие от `auth.uid()`,
-требуют отдельной проверки личности и прав. Turnstile пользователя не идентифицирует.
+The server decides the RPC name and argument set. Check types, sizes and required fields. Keep
+price, availability, rate-limit and idempotency checks inside the RPC. `service_role` bypasses
+RLS, so a public gate suits narrow operations such as creating an order. User operations that
+depend on `auth.uid()` need their own identity and permission checks — Turnstile does not
+identify the user.
 
-До вызова RPC шлюз сверяет `success === true`, `action` с ключом из `ACTIONS`
-и `hostname` с разрешёнными хостами. Проверка действия связывает токен с
-операцией, проверка хоста — с сайтом. При таймауте или ошибке Siteverify
-RPC не вызывается. Используйте строгую проверку хоста даже при ошибке настройки:
-пустой список хостов должен блокировать запросы. В `verifyTurnstile` замените
-условную проверку списка на `if (!ALLOWED_HOSTS.includes(v.hostname)) return false;`.
+Before calling the RPC the gate checks `success === true`, `action` against the `ACTIONS` key and
+`hostname` against the allowed hosts. The action check binds the token to the operation; the host
+check binds it to the site. On a Siteverify timeout or error the RPC is not called. The template
+checks the host strictly: an empty host list blocks every request instead of silently allowing
+all. A request without a token gets `403 captcha required`; a malformed request gets `400`.
 [Cloudflare Siteverify](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)
 
-Для контракта «без токена → 403» замените в шаблоне проверку
-`if (!action || !token || token.length > 2048)`. В исходном ассете отсутствие
-токена даёт `400`.
+## Keys, CORS and CSP
 
-```ts
-if (!action || token.length > 2048) {
-  return reply({ message: "bad request" }, 400, origin);
-}
-if (!token) return reply({ message: "captcha required" }, 403, origin);
-```
-
-## Ключи, CORS и CSP
-
-- В Cloudflare создайте виджет Managed. Укажите хосты сайта, например
-  `my-site.vercel.app`. В браузерный `config.js` идёт только публичный
-  `TURNSTILE_SITE_KEY`.
-- В Edge Function Secrets задайте `TURNSTILE_SECRET_KEY` и `ALLOWED_ORIGINS`
-  (список через запятую, например `https://my-site.vercel.app`). Origin включает
-  схему и порт, если он нестандартный. Путь и завершающий слеш уберите.
-  `SUPABASE_URL` и `SUPABASE_SERVICE_ROLE_KEY` шаблон читает из окружения Supabase.
-  Сервисный ключ и секрет Turnstile держите на сервере.
-- Обработайте `OPTIONS` до разбора тела. Разрешённому origin возвращайте его в
-  `Access-Control-Allow-Origin` вместе с `Vary: Origin`. Разрешите заголовки,
-  которые реально посылает клиент. Вне браузера заголовок `Origin` задаёт сам
-  отправитель, поэтому CORS не заменяет Siteverify.
-- Пример запросов ниже рассчитан на legacy anon JWT. С включённым
-  `verify_jwt` платформа проверяет Bearer JWT до входа в функцию. Для публичного
-  шлюза с современным publishable key передавайте его в `apikey` и задайте
-  `verify_jwt = false` в секции `[functions.turnstile-gate]`. Сам шлюз
-  по-прежнему требует Turnstile. Для RPC от вошедшего клиента Bearer — его
-  access token. [Supabase Edge Function auth](https://supabase.com/docs/guides/functions/auth-headers)
-- В CSP добавьте `https://challenges.cloudflare.com` в `script-src` и
-  `frame-src`, а `https://<project-ref>.supabase.co` в `connect-src`
-  (или фактический API origin). При `script-src-elem` проверьте и его.
-  При `strict-dynamic` проверьте, что загрузчик виджета наследует доверие от
-  разрешённого скрипта. Для режима pre-clearance добавьте `'self'` в `connect-src`.
+- In Cloudflare, create a Managed widget and list the site's hosts, e.g. `my-site.vercel.app`.
+  Only the public `TURNSTILE_SITE_KEY` goes into the browser's `config.js`.
+- In Edge Function Secrets, set `TURNSTILE_SECRET_KEY` and `ALLOWED_ORIGINS` (comma-separated,
+  e.g. `https://my-site.vercel.app`). An origin includes the scheme and a non-default port; drop
+  the path and trailing slash. The template reads `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
+  from the Supabase environment. Keep the service key and the Turnstile secret on the server.
+- Handle `OPTIONS` before parsing the body. Echo an allowed origin in `Access-Control-Allow-Origin`
+  together with `Vary: Origin`. Allow the headers the client actually sends. Outside a browser the
+  sender sets `Origin` itself, so CORS does not replace Siteverify.
+- The request examples below assume a legacy anon JWT. With `verify_jwt` enabled, the platform
+  checks the Bearer JWT before the function runs. For a public gate with a modern publishable key,
+  send it in `apikey` and set `verify_jwt = false` under `[functions.turnstile-gate]`. The gate
+  still requires Turnstile. For RPCs from a signed-in client, the Bearer is their access token.
+  [Supabase Edge Function auth](https://supabase.com/docs/guides/functions/auth-headers)
+- In CSP, add `https://challenges.cloudflare.com` to `script-src` and `frame-src`, and
+  `https://<project-ref>.supabase.co` (or your actual API origin) to `connect-src`. If you use
+  `script-src-elem`, check it too. With `strict-dynamic`, make sure the widget loader inherits
+  trust from an allowed script. For pre-clearance mode, add `'self'` to `connect-src`.
   [Cloudflare CSP](https://developers.cloudflare.com/turnstile/reference/content-security-policy/)
 
-## Клиент
+## Client
 
-Внешний скрипт сайта подключает `api.js?render=explicit`. Контейнер
-`<div id="ts-order"></div>` разместите в открытой форме. Пример использует
-`cfg.SUPABASE_URL`, `cfg.SUPABASE_ANON_KEY` и `cfg.TURNSTILE_SITE_KEY`
-из конфигурации сайта.
+The site's external script loads `api.js?render=explicit`. Place the container
+`<div id="ts-order"></div>` inside the visible form. The example uses `cfg.SUPABASE_URL`,
+`cfg.SUPABASE_ANON_KEY` and `cfg.TURNSTILE_SITE_KEY` from the site config.
 
 ```js
 let turnstileReady;
@@ -110,7 +91,7 @@ function loadTurnstile() {
     const fail = () => {
       clearTimeout(timer);
       script.remove();
-      reject(new Error("Не загрузилась проверка. Повторите попытку."));
+      reject(new Error("The verification failed to load. Please try again."));
     };
     const timer = setTimeout(fail, 15000);
     script.onload = () => {
@@ -132,7 +113,7 @@ async function requestOrderToken() {
   let timer;
   try {
     return await new Promise((resolve, reject) => {
-      const fail = () => reject(new Error("Проверка не завершилась. Повторите попытку."));
+      const fail = () => reject(new Error("The verification did not complete. Please try again."));
       timer = setTimeout(fail, 60000);
       widgetId = ts.render("#ts-order", {
         sitekey: cfg.TURNSTILE_SITE_KEY,
@@ -154,7 +135,7 @@ let pending;
 const gateOn = Boolean(cfg.TURNSTILE_SITE_KEY);
 const fresh = () => prepared && Date.now() - prepared.at < 280_000;
 
-// Вызовите при открытии формы. Покажите ошибку при отправке, если проверка снова не удалась.
+// Call when the form opens. Show an error on submit if verification fails again.
 function prepareOrderToken() {
   if (!gateOn || fresh()) return Promise.resolve();
   return pending ??= requestOrderToken()
@@ -168,7 +149,7 @@ async function submitOrder(payload) {
 
   if (gateOn) {
     await prepareOrderToken();
-    if (!fresh()) throw new Error("Проверка устарела. Повторите попытку.");
+    if (!fresh()) throw new Error("The verification expired. Please try again.");
     const { token } = prepared;
     prepared = null;
     path = "/functions/v1/turnstile-gate";
@@ -187,43 +168,41 @@ async function submitOrder(payload) {
   const data = await response.json().catch(() => null);
   if (response.ok) return data;
   if (gateOn && response.status === 403) {
-    throw new Error("Проверка отклонена. Повторите попытку.");
+    throw new Error("The verification was rejected. Please try again.");
   }
-  throw new Error("Сервер не принял заказ. Повторите попытку.");
+  throw new Error("The server did not accept the order. Please try again.");
 }
 ```
 
-При открытии формы вызовите `prepareOrderToken().catch(() => {})`. На submit
-отключайте кнопку до завершения `submitOrder`, показывайте ошибку рядом с формой,
-сохраняйте поля и открывайте следующую вкладку после успешной проверки.
-Токен действует 300 секунд, один раз. Запас в 20 секунд оставляет время на
-доставку запроса. Токен убирается из памяти до отправки: даже при потере ответа
-он мог быть уже проверен. При повторе берите новый токен и сохраняйте ключ
-идемпотентности заказа, если RPC его поддерживает.
+Call `prepareOrderToken().catch(() => {})` when the form opens. On submit, disable the button
+until `submitOrder` finishes, show errors next to the form, keep the field values, and only open
+any follow-up tab after a successful check. A token is valid for 300 seconds, once. The
+20-second margin leaves time to deliver the request. The token is cleared from memory before
+sending: even if the response is lost, it may already have been verified. On retry, get a new
+token and keep the order's idempotency key if the RPC supports one.
 
-Пустой site key включает прямой RPC для переходного периода и отката. После
-lock-миграции он сработает только после восстановления гранта. При ошибке
-виджета или шлюза фолбэк по статусу не делайте.
+An empty site key switches the client to the direct RPC — useful during the transition and for
+rollback. After the lock migration this only works once the grant is restored. Don't fall back
+to the direct path based on a widget or gate error status.
 
-## Выкатка
+## Rollout
 
-1. **Выдать грант шлюзу.** Зафиксируйте исходные ACL и примените отдельную
-   миграцию. Старый сайт продолжает пользоваться своими грантами.
+1. **Grant the gate access.** Record the current ACLs and apply a separate migration. The old site
+   keeps using its own grants.
 
    ```sql
    grant execute on function public.place_order(jsonb) to service_role;
    ```
 
-2. **Настроить Cloudflare и секреты, выкатить шлюз.** Например,
-   `supabase functions deploy turnstile-gate --project-ref <project-ref>`
-   (подставьте значение без угловых скобок). Проверьте preflight, отказ без токена
-   и успешный запрос через браузер на стенде. Проверьте старый маршрут сайта.
-3. **Выкатить сайт с ключом и CSP.** На целевом домене проверьте каждое действие
-   из `ACTIONS` и запись в базе. Учтите открытые вкладки и кэшированные
-   `config.js` и JS: старая сборка продолжит вызывать RPC напрямую. Обновите
-   ассеты на CDN и открытые вкладки до отзыва грантов.
-4. **Применить lock отдельной миграцией.** Подставьте все нужные сигнатуры.
-   Повторите браузерную проверку и проверьте отказ браузерным ролям.
+2. **Configure Cloudflare and secrets, deploy the gate.** For example,
+   `supabase functions deploy turnstile-gate --project-ref <project-ref>` (substitute the value
+   without the angle brackets). Check the preflight, the no-token rejection and a successful
+   browser request on staging. Check that the site's old path still works.
+3. **Deploy the site with the key and CSP.** On the target domain, check every action in `ACTIONS`
+   and the resulting database row. Remember open tabs and cached `config.js`/JS: an old build keeps
+   calling the RPC directly. Make sure CDN assets and open tabs have refreshed before revoking grants.
+4. **Apply the lock as a separate migration.** Include every relevant signature. Repeat the browser
+   check and confirm that browser roles are rejected.
 
    ```sql
    begin;
@@ -232,41 +211,39 @@ lock-миграции он сработает только после восст
    commit;
    ```
 
-## Откат
+## Rollback
 
-Если lock уже применён, сначала верните прежние прямые гранты ролям,
-которые использовал сайт. Например, если обе роли имели доступ:
+If the lock is already applied, first restore the direct grants for the roles the site used.
+For example, if both roles had access:
 
 ```sql
 grant execute on function public.place_order(jsonb) to anon, authenticated;
 ```
 
-Затем очистите `TURNSTILE_SITE_KEY` и выкатите конфиг либо возвратите рабочую
-прямую сборку. Проверьте заказ в новой вкладке. Пока старые вкладки используют
-шлюз, сохраните его рабочую конфигурацию. Возврат прямых грантов снова открывает
-операцию без капчи.
+Then clear `TURNSTILE_SITE_KEY` and deploy the config, or roll back to a working direct build.
+Test an order in a new tab. While old tabs still use the gate, keep its configuration working.
+Restoring direct grants reopens the operation without a captcha.
 
-## Грабли
+## Pitfalls
 
-- Шлюз прошёл капчу, но получил `permission denied for function place_order`.
-  У `service_role` отсутствовал `EXECUTE`. Проверяйте его отдельным грантом
-  до деплоя фронта и до отзыва `PUBLIC`.
-- Проверка стартовала после перехода в мессенджер. Если требовалось действие
-  в виджете, пользователь его не видел, а запрос ждал до таймаута.
-- Lock выкатили бы раньше сайта — старый клиент потерял бы маршрут. Грант,
-  деплой клиента и lock должны быть отдельными шагами.
-- Если сверять только `success`, потеряется привязка для другого действия или
-  хоста. Тестовые ключи Cloudflare возвращают условный hostname и не возвращают
-  action. Для проверки обеих привязок используйте отдельный реальный виджет
-  на стенде. [Тестовые ключи Cloudflare](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
-- Preview, кастомный домен и основной домен Vercel — разные origins. Проверьте
-  оба списка (Cloudflare и `ALLOWED_ORIGINS`) и ответ на preflight.
-  Если gateway отвечает `401` до функции, проверьте `verify_jwt` и тип ключа.
+- The gate passed the captcha but got `permission denied for function place_order`: `service_role`
+  had no `EXECUTE`. Add that grant separately, before deploying the frontend and before revoking
+  `PUBLIC`.
+- Verification started after the user switched to a messenger app. If the widget needed an
+  interaction, the user never saw it and the request waited until the timeout.
+- Shipping the lock before the site would have cut the old client off. Grant, client deploy and
+  lock must be separate steps.
+- Checking only `success` loses the binding to the action and host. Cloudflare's test keys return
+  a dummy hostname and no action, so use a separate real widget on staging to test both bindings.
+  [Cloudflare test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
+- Preview, custom and primary Vercel domains are different origins. Check both lists (Cloudflare
+  and `ALLOWED_ORIGINS`) and the preflight response. If the gateway answers `401` before the
+  function runs, check `verify_jwt` and the key type.
 
-## Как проверить
+## How to verify
 
-На стенде с настроенным шлюзом и применённым lock. Перед запуском задайте
-`SUPABASE_URL` и `ANON_JWT` для стенда. Origin должен быть разрешён.
+On staging with the gate configured and the lock applied. Set `SUPABASE_URL` and `ANON_JWT` for
+staging first. The origin must be allowed.
 
 ```bash
 curl -i "$SUPABASE_URL/functions/v1/turnstile-gate" \
@@ -282,13 +259,12 @@ curl -i "$SUPABASE_URL/rest/v1/rpc/place_order" \
 # PostgreSQL 42501, permission denied for function place_order
 ```
 
-В браузере проверьте preflight и успешную запись с новым токеном. В тесте
-шлюза повторно подайте использованный токен и проверьте `403` и отсутствие новой
-записи. Проверьте CSP в консоли и через `scripts/csp_scan.mjs` для inline-кода.
+In the browser, check the preflight and a successful write with a fresh token. In the gate test,
+resubmit a used token and confirm a `403` and no new row. Check CSP in the console and with
+`scripts/csp_scan.mjs` for inline code.
 
-На стенде `scripts/pg-harness/` добавьте эту проверку в сценарий после подготовки
-валидного заказа. Она проверяет права SQL; реальную проверку токена покрывает
-тест шлюза.
+On the `scripts/pg-harness/` harness, add this check to a scenario after preparing a valid order.
+It covers SQL permissions; real token verification is covered by the gate test.
 
 ```js
 async function checkOrderGate(h, validOrder) {
@@ -298,17 +274,17 @@ async function checkOrderGate(h, validOrder) {
   const uid = await h.createUser({ email: "customer@example.com" });
   await h.rejects(h.asUser(uid, sql, args), /permission denied/);
   const result = await h.asService(sql, args);
-  h.assert.ok(result.rows[0]?.id); // адаптируйте к результату вашей RPC
+  h.assert.ok(result.rows[0]?.id); // adapt to your RPC's result
 }
 ```
 
-Вызовите `await checkOrderGate(h, validOrder)` из `export default async function (h)`.
-Запустите с полным порядком миграций и `--twice` для lock-файла.
+Call `await checkOrderGate(h, validOrder)` from `export default async function (h)`. Run with the
+full migration order and `--twice` for the lock file.
 
 ```bash
 node "$HARNESS/harness.mjs" --repo "$PROJECT" --scenario "$CHECKS" --twice turnstile_lock.sql
 ```
 
-`HARNESS` — подготовленная копия `scripts/pg-harness/` после `sh setup.sh`,
-`PROJECT` — каталог проекта, `CHECKS` — путь к сценарию. Если порядок в DEPLOY.md
-не распознан, передайте `--migrations` со списком файлов через запятую.
+`HARNESS` is a prepared copy of `scripts/pg-harness/` after `sh setup.sh`, `PROJECT` is the project
+directory, `CHECKS` is the scenario path. If the order in DEPLOY.md isn't recognized, pass
+`--migrations` with a comma-separated list of files.
